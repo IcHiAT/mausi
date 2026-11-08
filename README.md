@@ -4,6 +4,10 @@ Kleines Programm in Rust, das DPI und Abfragerate (Hz) von Logitech-Mäusen setz
 
 Getestet mit der **PRO X Superlight 2** („PRO X 2“) am LIGHTSPEED-Empfänger (046D:C54D). Andere Logitech-Mäuse können funktionieren (siehe unten), sind aber nicht geprüft.
 
+| Einblendung beim Wechsel von DPI oder Hz | Menü im Tray |
+|---|---|
+| ![Einblendung mit DPI und Hz](assets/einblendung.png) | ![Tray-Menü im schwarzen Design](assets/menue.png) |
+
 ## Download und Start
 
 1. `Mausi.exe` von der [Release-Seite](https://github.com/IcHiAT/mausi/releases/latest) laden und in einen eigenen Ordner legen, z. B. `%LOCALAPPDATA%\Programs\maus\`.
