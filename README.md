@@ -20,7 +20,7 @@ Läuft unter Windows 10/11, keine Installation und kein G HUB nötig. Die Benutz
 
 | Befehl | Wirkung |
 |---|---|
-| `maus` | Tray-Symbol starten. Links- oder Rechtsklick öffnet das Menü mit „Desktop“ und „Vollbild (Spiel)“ (jeweils DPI und Abfragerate), „Mit Windows starten“, „Schwarzes Design“, „Maus neu suchen“ und „Beenden“. |
+| `maus` | Tray-Symbol starten. Links- oder Rechtsklick öffnet das Menü mit „Desktop“ und „Vollbild (Spiel)“ (jeweils DPI und Abfragerate), „Mit Windows starten“, „Im Startmenü anzeigen“, „Schwarzes Design“, „Maus neu suchen“ und „Beenden“. |
 | `maus status` | zeigt Name, DPI, Hz und die möglichen Werte |
 | `maus dpi 800` | setzt die DPI (bei der PRO X 2 sind 100–44000 möglich) |
 | `maus hz 1000` | setzt die Abfragerate (bei der PRO X 2: 125, 250, 500, 1000, 2000, 4000, 8000) |
@@ -65,5 +65,5 @@ Mäuse mit diesen Features sollten ohne Änderung laufen, getestet ist aber nur 
 Der Task-Manager zeigt Dateibeschreibung, Herausgeber (`-Firma`, Standard IcHiAT) und Icon der exe, im Autostart-Tab erst nach einigen Sekunden. Der GNU-Toolchain bindet keine Ressourcen ein, deshalb nach jedem Build:
 
 ```powershell
-.\werkzeug\ressourcen.ps1 -Exe .\target\release\maus.exe -Ico .\assets\mausi.ico -Name Mausi -Version 0.1.0
+.\werkzeug\ressourcen.ps1 -Exe .\target\release\maus.exe -Ico .\assets\mausi.ico -Name Mausi -Version 0.1.1
 ```

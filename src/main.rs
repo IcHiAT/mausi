@@ -6,6 +6,8 @@ mod hidpp;
 #[cfg(windows)]
 mod design;
 #[cfg(windows)]
+mod startmenue;
+#[cfg(windows)]
 mod tray;
 
 use hidpp::Maus;

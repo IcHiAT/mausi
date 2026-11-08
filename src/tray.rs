@@ -2,6 +2,7 @@
 
 use crate::design;
 use crate::hidpp::Maus;
+use crate::startmenue;
 use crate::zustand;
 use std::cell::{Cell, RefCell};
 use std::ptr::{null, null_mut};
@@ -30,6 +31,7 @@ const ID_VDPI_AUS: usize = 7;
 const ID_VDPI_EIGEN: usize = 8;
 const ID_VHZ_AUS: usize = 10;
 const ID_DESIGN: usize = 11;
+const ID_STARTMENUE: usize = 12;
 const ID_EDIT: usize = 101;
 const TIMER_LIVE: usize = 1;
 const TIMER_AKKU: usize = 2;
@@ -687,6 +689,8 @@ unsafe fn menu_zeigen(hwnd: HWND) {
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     let auto = if autostart_an() { MF_CHECKED } else { 0 };
     AppendMenuW(menu, MF_STRING | auto, ID_AUTO, w("Mit Windows starten").as_ptr());
+    let im_startmenue = startmenue::vorhanden("Mausi");
+    AppendMenuW(menu, MF_STRING | if im_startmenue { MF_CHECKED } else { 0 }, ID_STARTMENUE, w("Im Startmenü anzeigen").as_ptr());
     let schwarz = if design::schwarz() { MF_CHECKED } else { 0 };
     AppendMenuW(menu, MF_STRING | schwarz, ID_DESIGN, w("Schwarzes Design").as_ptr());
     AppendMenuW(menu, MF_STRING, ID_NEU, w("Maus neu suchen").as_ptr());
@@ -716,6 +720,10 @@ unsafe fn menu_zeigen(hwnd: HWND) {
         }
         ID_AUTO => {
             autostart_setzen(auto == 0);
+            Ok(())
+        }
+        ID_STARTMENUE => {
+            startmenue::setzen("Mausi", !im_startmenue);
             Ok(())
         }
         ID_NEU => {
