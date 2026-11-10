@@ -2,6 +2,7 @@
 //! maus - DPI und Abfragerate von Logitech-Mäusen setzen.
 //! Ohne Argumente: Tray-Symbol (Windows). Mit Argumenten: Kommandozeile.
 
+mod g400s;
 mod hidpp;
 #[cfg(windows)]
 mod design;
@@ -16,6 +17,7 @@ const HILFE: &str = "maus - DPI und Abfragerate von Logitech-Mäusen
 
   maus              Tray-Symbol starten (Rechtsklick = Menü)
   maus status       Name, DPI, Hz und mögliche Werte anzeigen
+  maus geraete      alle angeschlossenen Mäuse auflisten
   maus dpi 800      DPI setzen
   maus hz 1000      Abfragerate setzen
   maus hilfe        diese Hilfe";
@@ -88,6 +90,18 @@ fn cli(a: &[String]) -> Result<(), String> {
             println!("{}: Abfragerate auf {v} Hz gesetzt", m.name);
             #[cfg(windows)]
             tray::einblendung_anstossen();
+            Ok(())
+        }
+        "geraete" => {
+            let t = std::time::Instant::now();
+            let (mause, fremde) = hidpp::alle();
+            for m in &mause {
+                println!("{}  ({:04X}:{:04X})", m.name, m.vid, m.pid);
+            }
+            for f in &fremde {
+                println!("{}  ({:04X}:{:04X}, nicht einstellbar)", f.name, f.vid, f.pid);
+            }
+            println!("Suche: {} ms", t.elapsed().as_millis());
             Ok(())
         }
         "liste" => {

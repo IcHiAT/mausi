@@ -1,6 +1,6 @@
 # Mausi
 
-Kleines Programm in Rust, das DPI und Abfragerate (Hz) von Logitech-Mäusen setzt, ganz ohne G HUB. Es spricht direkt das HID++-Protokoll der Maus. Die exe ist rund 710 KB groß und braucht im Tray etwa 10 MB RAM.
+Kleines Programm in Rust, das DPI und Abfragerate (Hz) von Logitech-Mäusen setzt, ganz ohne G HUB. Es spricht direkt das HID++-Protokoll der Maus. Die exe ist rund 470 KB groß und braucht im Tray etwa 10 MB RAM.
 
 Getestet mit der **PRO X Superlight 2** („PRO X 2“) am LIGHTSPEED-Empfänger (046D:C54D). Andere Logitech-Mäuse können funktionieren (siehe unten), sind aber nicht geprüft.
 
@@ -29,6 +29,7 @@ Läuft unter Windows 10/11, keine Installation und kein G HUB nötig. Die Benutz
 - **Akku:** Der Tooltip beim Drüberfahren und die Kopfzeile des Menüs zeigen den Ladestand, beim Laden mit „(lädt)“. Der Tooltip wird alle 15 Minuten aufgefrischt. Bei 10 % oder weniger erscheint einmal ein kleines Fenster unten rechts: „Maus-Akku fast leer“. Es nimmt keinen Fokus und geht per Klick oder nach 15 Sekunden weg; Windows-Benachrichtigungen braucht es nicht. Nach dem Laden oder sobald der Akku wieder über 10 % liegt, kann der Hinweis erneut kommen. Zum Testen lässt sich die Schwelle mit der Umgebungsvariable `MAUS_WARNUNG=50` hochsetzen. Unterstützt sind die Features `0x1004` (neu) und `0x1000` (alt). `maus status` zeigt den Ladestand ebenfalls.
 - **Vollbild (Spiel):** Unter „Vollbild (Spiel)“ lassen sich eigene DPI und eine eigene Abfragerate wählen; „Wie Desktop“ heißt, dass nichts umgestellt wird. maus prüft alle 2 Sekunden, ob ein Spiel im Vollbild läuft: exklusives Vollbild meldet Windows, bei randlosem Vollbild bedeckt das Vordergrundfenster den ganzen Monitor und muss zusätzlich ein Spiel sein. Als Spiel zählt, was in einem Launcher-Ordner liegt (Steam, Epic, Riot, EA, Origin, GOG, Ubisoft, XboxGames) oder sich wegen Anti-Cheat nicht abfragen lässt. Andere Spiele trägst du in `maus.ini` neben der exe ein, als Teil des Pfads oder Dateiname: `spiele = valorant.exe, D:\Spiele`. Browser und andere Programme im Vollbild stellen nichts um und blenden nichts ein. Beim Verlassen kommen die Desktop-Werte zurück. Solange ein Spiel läuft, steht im Menü „gerade aktiv“. Gespeichert wird in `zustand.txt` als `<Maus>.vollbild_dpi` und `<Maus>.vollbild_hz`.
 - **Einblendung:** Beim Wechsel von DPI oder Hz (Menü oder Kommandozeile) und beim Start eines Spiels im Vollbild erscheint rechts am Bildschirmrand, vertikal mittig, ein kleines Feld mit DPI und Hz: rund 3 Sekunden mit Ein- und Ausblenden. Beim Verlassen des Vollbilds kommt es nur, wenn eigene Spielwerte zurückgestellt wurden. Es nimmt keinen Fokus und lässt Klicks durch. Echtes exklusives D3D-Vollbild kann kein Fenster überlagern. Die DPI-Taste an der Maus löst es nicht aus.
+- **Tray-Symbol:** Es richtet sich nach der Windows-Taskleiste. Auf einer dunklen Taskleiste ist es die cyanfarbene Maus, auf einer hellen die schwarze. Ist keine Maus erreichbar, wird es hellgrau. Schaltet Windows zwischen hell und dunkel um, wechselt das Symbol sofort mit. Gelesen wird `SystemUsesLightTheme`. Unter „Tray-Symbol“ im Menü lässt sich stattdessen eins der vier Symbole fest wählen. Das Programm-Icon (exe, Startmenü) ist die hellgraue Maus.
 - **Schwarzes Design:** Im Menü umschaltbar, standardmäßig an. Es gilt für Menü, Eingabefeld, Akku-Hinweis und Einblendung. Gespeichert wird als `design_schwarz` in `zustand.txt`. Fehlermeldungen bleiben Standard-Windows-Fenster.
 - **Eigener DPI-Wert:** Unter Desktop → DPI → „Eigener Wert …“ öffnet sich ein Eingabefeld. Enter übernimmt den Wert, Esc bricht ab.
 - **Live-Hz:** Solange das Menü offen ist, zeigt die zweite Zeile die gemessene Rate, während du die Maus bewegst. Angezeigt wird der Höchstwert der letzten Sekunde. Gemessen wird über Raw Input; das Menü ist dabei im Vordergrund, deshalb drosselt Windows nicht.
@@ -47,6 +48,8 @@ cargo build --release
 ```
 
 Ergebnis: `target\release\maus.exe`.
+
+Die Icons liegen als SVG in `assets/icons/`. `python werkzeug/icons.py` rendert sie mit Chrome (headless) und Pillow in alle Größen und schreibt die `.ico`-Dateien neu. Die vier Tray-Symbole bindet der Build ein. `assets/mausi.ico` kommt danach mit `werkzeug\ressourcen.ps1` in die exe.
 
 - `hidapi` ist auf **2.6.3** festgelegt. Neuere Versionen ziehen windows-sys 0.61 nach. Das braucht unter dem GNU-Toolchain `dlltool` samt Assembler, und das schlägt fehl.
 - Unter Linux sollte es mit `linux-native` gehen (nur Kommandozeile, kein Tray). Das ist nicht getestet.

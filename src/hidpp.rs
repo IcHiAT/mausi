@@ -3,8 +3,11 @@
 //! Lange Meldung (Report-ID 0x11, 20 Byte): [0x11, Gerät, Feature-Index, Funktion<<4 | SW-ID, Parameter...]
 //! Feature-Nummern: 0x0005 Name, 0x2201/0x2202 DPI, 0x8060/0x8061 Abfragerate.
 
+use crate::g400s;
 use hidapi::{HidApi, HidDevice};
 use std::cell::Cell;
+use std::ffi::CString;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// Index -> Hz für Feature 0x8061 (8 ms ... 125 µs)
@@ -29,8 +32,13 @@ enum Rate {
 }
 
 pub struct Maus {
-    _api: HidApi,
+    _api: Rc<HidApi>,
     dev: HidDevice,
+    /// Hersteller- und Produktnummer der HID-Schnittstelle (beim Funkempfänger die des Empfängers)
+    pub vid: u16,
+    pub pid: u16,
+    pfad: CString,
+    /// 0xFF = Kabel, 1-6 = Funkempfänger, 0 = G400s (kein HID++)
     idx: u8,
     swid: Cell<u8>,
     pub name: String,
@@ -72,47 +80,144 @@ pub fn liste() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Eine Maus, die Mausi nicht einstellen kann (anderer Hersteller oder älteres Protokoll).
+pub struct Fremd {
+    pub name: String,
+    pub vid: u16,
+    pub pid: u16,
+}
+
+/// Fundort einer Maus: HID-Schnittstelle und Platz (0xFF = Kabel, 1-6 = Funkempfänger, 0 = G400s).
+pub struct Platz {
+    pub pfad: CString,
+    pub idx: u8,
+}
+
+const G400S_DPI: &str = "Die DPI der G400s lassen sich nur mit den DPI-Tasten an der Maus umschalten";
+
+/// Platz-Nummer für die G400s (HID++ benutzt 0 nie)
+const G400S: u8 = 0;
+
+fn hidpp_schnittstelle(i: &hidapi::DeviceInfo) -> bool {
+    i.vendor_id() == 0x046D && i.usage_page() == 0xFF00 && i.usage() == 0x0002
+}
+
+/// Alle Plätze abfragen, an denen eine einstellbare Maus antwortet. Dauert 2–4 s (schlafende Funkmaus),
+/// deshalb läuft das im Tray in einem eigenen Thread; danach verbindet `verbinden` schnell.
+pub fn suchen() -> Vec<Platz> {
+    suchen_mit_luecke().0
+}
+
+/// Wie `suchen`, dazu: gab es einen Empfänger oder Anschluss, an dem keine Maus geantwortet hat?
+/// (z. B. Funkmaus schläft tief oder ist aus) – dann lohnt es sich, später noch einmal zu suchen.
+pub fn suchen_mit_luecke() -> (Vec<Platz>, bool) {
+    let Ok(api) = HidApi::new() else { return (Vec::new(), false) };
+    let api = Rc::new(api);
+    let infos: Vec<_> = api.device_list().filter(|i| hidpp_schnittstelle(i)).cloned().collect();
+    let mut gefunden: Vec<Platz> = Vec::new();
+    let mut luecke = false;
+    for info in &infos {
+        let Some(m) = Maus::oeffnen(&api, info, 0xFF) else { continue };
+        // Ein Empfänger kann mehrere Mäuse haben: alle Plätze zugleich anpingen.
+        let vorher = gefunden.len();
+        for idx in m.wer_antwortet() {
+            let Some(mut m) = Maus::oeffnen(&api, info, idx) else { continue };
+            if m.einrichten(3) {
+                gefunden.push(Platz { pfad: info.path().to_owned(), idx });
+            }
+        }
+        luecke |= gefunden.len() == vorher;
+    }
+    for info in api.device_list().filter(|i| g400s::schnittstelle(i)) {
+        if Maus::oeffnen(&api, info, G400S).is_some_and(|m| g400s::da(&m.dev)) {
+            gefunden.push(Platz { pfad: info.path().to_owned(), idx: G400S });
+        }
+    }
+    (gefunden, luecke)
+}
+
+/// Mit den gefundenen Plätzen verbinden.
+pub fn verbinden(plaetze: &[Platz]) -> Vec<Maus> {
+    let Ok(api) = HidApi::new() else { return Vec::new() };
+    let api = Rc::new(api);
+    let mut v = Vec::new();
+    for p in plaetze {
+        let Some(info) = api.device_list().find(|i| i.path() == p.pfad.as_c_str()).cloned() else { continue };
+        let Some(mut m) = Maus::oeffnen(&api, &info, p.idx) else { continue };
+        if p.idx == G400S {
+            if g400s::da(&m.dev) {
+                m.name = g400s::NAME.into();
+                v.push(m);
+            }
+        } else if m.einrichten(3) {
+            v.push(m);
+        }
+    }
+    v
+}
+
+/// Mäuse, die Mausi nicht einstellen kann: Maus-Schnittstellen von Geräten ohne HID++.
+pub fn fremde() -> Vec<Fremd> {
+    let Ok(api) = HidApi::new() else { return Vec::new() };
+    let hidpp_ids: Vec<(u16, u16)> =
+        api.device_list().filter(|i| hidpp_schnittstelle(i)).map(|i| (i.vendor_id(), i.product_id())).collect();
+    let mut fremde: Vec<Fremd> = Vec::new();
+    for i in api.device_list().filter(|i| i.usage_page() == 1 && i.usage() == 2) {
+        let id = (i.vendor_id(), i.product_id());
+        if hidpp_ids.contains(&id) || id == (g400s::VID, g400s::PID) || fremde.iter().any(|f| (f.vid, f.pid) == id) {
+            continue;
+        }
+        let name = i.product_string().unwrap_or("").trim();
+        // Tastaturen melden für Makrotasten oft auch eine Maus-Schnittstelle
+        let klein = format!(" {} ", name.to_lowercase());
+        let tastatur = api.device_list().any(|t| (t.vendor_id(), t.product_id()) == id && t.usage_page() == 1 && t.usage() == 6);
+        let maus_im_namen = klein.contains("mouse") || klein.contains("maus");
+        if name.is_empty() || klein.contains("keyboard") || klein.contains(" kb ") || (tastatur && !maus_im_namen) {
+            continue;
+        }
+        fremde.push(Fremd { name: name.to_string(), vid: id.0, pid: id.1 });
+    }
+    fremde
+}
+
+/// Alle Mäuse: die einstellbaren (HID++ 2.0 und G400s) und die übrigen.
+pub fn alle() -> (Vec<Maus>, Vec<Fremd>) {
+    (verbinden(&suchen()), fremde())
+}
+
 impl Maus {
     /// Erste Logitech-Maus suchen, die DPI oder Abfragerate per HID++ kann.
     pub fn finden() -> Result<Maus, String> {
-        let api = HidApi::new().map_err(|e| format!("HID nicht verfügbar: {e}"))?;
-        let infos: Vec<_> = api
-            .device_list()
-            .filter(|i| i.vendor_id() == 0x046D && i.usage_page() == 0xFF00 && i.usage() == 0x0002)
-            .cloned()
-            .collect();
-        let mut api = Some(api);
-        for info in infos {
-            let Ok(dev) = info.open_device(api.as_ref().unwrap()) else { continue };
-            let _ = dev.set_blocking_mode(false);
-            let mut m = Maus {
-                _api: api.take().unwrap(),
-                dev,
-                idx: 0,
-                swid: Cell::new(1),
-                name: String::new(),
-                dpi_f: None,
-                rate_f: None,
-                akku_f: None,
-            };
-            // 1-6 = Platz am Funkempfänger, 0xFF = per Kabel.
-            // Zweite Runde mit mehr Geduld: eine schlafende Maus antwortet erst verzögert.
-            for versuche in [2, 6] {
-                for idx in [1u8, 2, 3, 4, 5, 6, 0xFF] {
-                    m.idx = idx;
-                    if m.einrichten(versuche) {
-                        return Ok(m);
-                    }
-                }
-            }
-            api = Some(m._api);
-        }
-        Err("keine Logitech-Maus mit HID++ gefunden (eingeschaltet?)".into())
+        // MAUS_NR=2 wählt die zweite gefundene Maus (zum Testen)
+        let nr = std::env::var("MAUS_NR").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).max(1);
+        alle().0.into_iter().nth(nr - 1).ok_or_else(|| "keine Logitech-Maus mit HID++ gefunden (eingeschaltet?)".into())
+    }
+
+    fn oeffnen(api: &Rc<HidApi>, info: &hidapi::DeviceInfo, idx: u8) -> Option<Maus> {
+        let dev = info.open_device(api).ok()?;
+        let _ = dev.set_blocking_mode(false);
+        Some(Maus {
+            _api: api.clone(),
+            dev,
+            vid: info.vendor_id(),
+            pid: info.product_id(),
+            pfad: info.path().to_owned(),
+            idx,
+            swid: Cell::new(1),
+            name: String::new(),
+            dpi_f: None,
+            rate_f: None,
+            akku_f: None,
+        })
+    }
+
+    /// Gleiche Maus? (gleiche Schnittstelle, gleicher Platz)
+    pub fn gleich(&self, p: &Platz) -> bool {
+        self.pfad == p.pfad && self.idx == p.idx
     }
 
     fn einrichten(&mut self, versuche: usize) -> bool {
-        let da = (0..versuche).any(|_| matches!(self.req_einmal(0, 1, &[], 250), Ok(Some(_))));
-        if !da {
+        if !self.anpingen(versuche) {
             return false;
         }
         let f = |id| self.feature(id).ok().flatten();
@@ -127,6 +232,80 @@ impl Maus {
         self.rate_f = rate;
         self.name = self.name_lesen().unwrap_or_else(|_| "Logitech-Maus".into());
         true
+    }
+
+    /// Welche Plätze dieser Schnittstelle antworten? Pingt kabelgebunden (0xFF) und Empfänger-Plätze 1–6
+    /// gleichzeitig an und sammelt die Antworten, bis zu 2 s (schlafende Funkmaus).
+    fn wer_antwortet(&self) -> Vec<u8> {
+        const PLAETZE: [u8; 7] = [0xFF, 1, 2, 3, 4, 5, 6];
+        let mut buf = [0u8; 20];
+        while self.dev.read(&mut buf).unwrap_or(0) > 0 {}
+        let mut da: Vec<u8> = Vec::new();
+        let pingen = |da: &Vec<u8>| {
+            for idx in PLAETZE.iter().filter(|i| !da.contains(i)) {
+                let mut msg = [0u8; 20];
+                msg[..4].copy_from_slice(&[0x11, *idx, 0, 0x1F]);
+                let _ = self.dev.write(&msg);
+            }
+        };
+        let start = Instant::now();
+        pingen(&da);
+        let mut nochmal = true;
+        while start.elapsed() < Duration::from_millis(2000) {
+            if nochmal && start.elapsed() > Duration::from_millis(300) {
+                nochmal = false; // Funk verliert gelegentlich eine Meldung
+                pingen(&da);
+            }
+            match self.dev.read(&mut buf) {
+                Ok(n) if n >= 7 && buf[0] == 0x11 && buf[2] == 0 && buf[3] == 0x1F && PLAETZE.contains(&buf[1]) => {
+                    if !da.contains(&buf[1]) {
+                        da.push(buf[1]);
+                    }
+                    if buf[1] == 0xFF {
+                        break; // kabelgebunden: keine Empfänger-Plätze
+                    }
+                }
+                Ok(0) => std::thread::sleep(Duration::from_millis(1)),
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        if std::env::var_os("MAUS_DEBUG").is_some() {
+            eprintln!("antworten: {da:02x?} nach {} ms", start.elapsed().as_millis());
+        }
+        da
+    }
+
+    /// Ist an diesem Platz eine Maus? Eine Funkmaus im Schlaf antwortet erst nach ~1 s,
+    /// deshalb zählt auch eine verspätete Antwort auf einen früheren Ping.
+    fn anpingen(&self, versuche: usize) -> bool {
+        let mut buf = [0u8; 20];
+        while self.dev.read(&mut buf).unwrap_or(0) > 0 {} // alte Meldungen verwerfen
+        let antwort = |buf: &[u8; 20], n: usize| n >= 7 && buf[0] == 0x11 && buf[1] == self.idx && buf[2] == 0 && buf[3] >> 4 == 1;
+        let dbg = std::env::var_os("MAUS_DEBUG").is_some();
+        for i in 0..versuche {
+            let sw = self.swid.get() % 15 + 1;
+            self.swid.set(sw);
+            let mut msg = [0u8; 20];
+            msg[..4].copy_from_slice(&[0x11, self.idx, 0, 0x10 | sw]);
+            let w = self.dev.write(&msg);
+            if dbg { eprintln!("ping {:02x} {:?}", self.idx, w); }
+            if w.is_err() {
+                return false;
+            }
+            // nach dem letzten Ping länger warten, damit eine aufwachende Maus noch antworten kann
+            let ms = if i + 1 == versuche { 1500 } else { 250 };
+            let ende = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < ende {
+                match self.dev.read(&mut buf) {
+                    Ok(n) if antwort(&buf, n) => return true,
+                    Ok(0) => std::thread::sleep(Duration::from_millis(1)),
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+        }
+        false
     }
 
     fn req_einmal(&self, f: u8, func: u8, p: &[u8], ms: u64) -> Result<Option<[u8; 16]>, String> {
@@ -200,7 +379,15 @@ impl Maus {
 
     // ---------- DPI ----------
 
+    /// Kann Mausi die DPI dieser Maus ändern? (Bei der G400s nur anzeigen.)
+    pub fn dpi_einstellbar(&self) -> bool {
+        self.idx != G400S
+    }
+
     pub fn dpi(&self) -> Result<u32, String> {
+        if self.idx == G400S {
+            return g400s::dpi(&self.dev);
+        }
         match self.dpi_f.ok_or("DPI nicht unterstützt")? {
             Dpi::Ext(f) => {
                 let r = self.req(f, 5, &[0])?;
@@ -213,8 +400,24 @@ impl Maus {
         }
     }
 
+    /// DPI mit einem einzigen kurzen Versuch (für das offene Menü). None = keine Antwort in der Zeit.
+    pub fn dpi_schnell(&self) -> Option<u32> {
+        if self.idx == G400S {
+            return g400s::dpi(&self.dev).ok();
+        }
+        let (f, func) = match self.dpi_f? {
+            Dpi::Ext(f) => (f, 5),
+            Dpi::Basis(f) => (f, 2),
+        };
+        let r = self.req_einmal(f, func, &[0], 60).ok()??;
+        Some(be(r[1], r[2]))
+    }
+
     /// (kleinster, größter) DPI-Wert des Sensors
     pub fn dpi_bereich(&self) -> Result<(u32, u32), String> {
+        if self.idx == G400S {
+            return Err(G400S_DPI.into());
+        }
         let werte = match self.dpi_f.ok_or("DPI nicht unterstützt")? {
             Dpi::Ext(f) => {
                 // Liste ist ein Bytestrom über mehrere Seiten (je 13 Byte)
@@ -240,6 +443,9 @@ impl Maus {
     }
 
     pub fn set_dpi(&self, v: u32) -> Result<(), String> {
+        if self.idx == G400S {
+            return Err(G400S_DPI.into());
+        }
         let (min, max) = self.dpi_bereich()?;
         if v < min || v > max {
             return Err(format!("{v} DPI geht nicht, erlaubt sind {min}-{max}"));
@@ -260,12 +466,13 @@ impl Maus {
         self.mit_host_modus(setzen)
     }
 
-    /// Führt `aktion` aus. Lehnt die Maus mit Fehler 5 ab, steht sie im Onboard-Modus
+    /// Führt `aktion` aus. Lehnt die Maus mit Fehler 5 oder 2 ab, steht sie im Onboard-Modus
     /// (Werte kommen aus dem gespeicherten Profil). Dann auf Host-Modus (0x8100, Modus 2)
-    /// umschalten und noch einmal versuchen.
+    /// umschalten und noch einmal versuchen. Die Werte sind vorher geprüft, Fehler 2 heißt
+    /// hier also nicht „Wert ungültig“.
     fn mit_host_modus(&self, aktion: impl Fn() -> Result<(), String>) -> Result<(), String> {
         match aktion() {
-            Err(e) if e.ends_with("Fehler 5") => {
+            Err(e) if e.ends_with("Fehler 5") || e.ends_with("Fehler 2") => {
                 let f = self.feature(0x8100)?.ok_or(e)?;
                 self.req(f, 1, &[2])?; // setOnboardMode(host)
                 aktion()
@@ -278,6 +485,9 @@ impl Maus {
 
     /// (Ladestand in %, lädt gerade)
     pub fn akku(&self) -> Result<(u8, bool), String> {
+        if self.idx == G400S {
+            return Err("kabelgebunden, kein Akku".into());
+        }
         match self.akku_f.ok_or("Akkustand nicht unterstützt")? {
             Akku::Unified(f) => {
                 let r = self.req(f, 1, &[])?;
@@ -294,6 +504,9 @@ impl Maus {
 
     /// Unterstützte Raten in Hz, aufsteigend
     pub fn raten(&self) -> Result<Vec<u32>, String> {
+        if self.idx == G400S {
+            return Ok(g400s::raten());
+        }
         match self.rate_f.ok_or("Abfragerate nicht unterstützt")? {
             Rate::Ext(f) => {
                 let r = self.req(f, 1, &[])?;
@@ -310,6 +523,9 @@ impl Maus {
     /// Wert, den die Maus selbst meldet. Bei 0x8061 (z. B. PRO X Superlight 2) bleibt er
     /// nach dem Setzen auf dem alten Stand stehen, obwohl die echte Rate wechselt.
     pub fn hz(&self) -> Result<u32, String> {
+        if self.idx == G400S {
+            return g400s::hz(&self.dev);
+        }
         match self.rate_f.ok_or("Abfragerate nicht unterstützt")? {
             Rate::Ext(f) => {
                 let i = self.req(f, 2, &[])?[0] as usize;
@@ -324,6 +540,9 @@ impl Maus {
     }
 
     pub fn set_hz(&self, hz: u32) -> Result<(), String> {
+        if self.idx == G400S {
+            return g400s::set_hz(&self.dev, hz);
+        }
         let raten = self.raten()?;
         if !raten.contains(&hz) {
             let l: Vec<String> = raten.iter().map(|r| r.to_string()).collect();

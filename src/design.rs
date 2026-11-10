@@ -154,11 +154,12 @@ pub fn menu_fertig() {
 }
 
 /// Text eines selbst gezeichneten Eintrags ändern. false = Eintrag ist nativ.
-pub unsafe fn menu_text_setzen(menu: HMENU, id: u32, text: &str) -> bool {
+/// `nach_pos` = `item` ist die Position statt der ID (z. B. für Untermenü-Titel).
+pub unsafe fn menu_text_setzen(menu: HMENU, item: u32, nach_pos: bool, text: &str) -> bool {
     let mut mii: MENUITEMINFOW = std::mem::zeroed();
     mii.cbSize = std::mem::size_of::<MENUITEMINFOW>() as u32;
     mii.fMask = MIIM_DATA;
-    if GetMenuItemInfoW(menu, id, 0, &mut mii) == 0 || mii.dwItemData == 0 {
+    if GetMenuItemInfoW(menu, item, nach_pos as i32, &mut mii) == 0 || mii.dwItemData == 0 {
         return false;
     }
     MENU_TEXTE.with(|t| {
