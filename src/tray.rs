@@ -344,13 +344,15 @@ unsafe fn breit_gleich(p: *const u16, text: &str) -> bool {
 unsafe fn tip_aktualisieren(hwnd: HWND, aktion: u32) -> Vec<Eintrag> {
     auffrischen();
     let liste = uebersicht();
-    let tip = if liste.is_empty() {
-        if APP.with(|c| c.borrow().suche_laeuft) { "Mausi: suche Maus …".to_string() } else { "Mausi: keine einstellbare Maus gefunden".to_string() }
+    let inhalt = if liste.is_empty() {
+        if APP.with(|c| c.borrow().suche_laeuft) { "suche Maus …".to_string() } else { "keine einstellbare Maus gefunden".to_string() }
     } else {
         let zeilen: Vec<String> =
             liste.iter().map(|e| e.stand.as_ref().map(kopf).unwrap_or_else(|| format!("{}: antwortet nicht", e.name))).collect();
         zeilen.join("\n")
     };
+    // Erste Zeile: Programmname und Version (Tooltip ist auf 127 Zeichen begrenzt, Version bleibt vorn)
+    let tip = format!("Mausi {}\n{}", env!("CARGO_PKG_VERSION"), inhalt);
     symbol_waehlen(liste.iter().any(|e| e.stand.is_some()));
     tray(hwnd, aktion, &tip);
     for e in &liste {
@@ -610,6 +612,17 @@ fn autostart_setzen(an: bool) {
         } else {
             RegDeleteKeyValueW(HKEY_CURRENT_USER, w(RUN).as_ptr(), w("Maus").as_ptr());
         }
+    }
+}
+
+/// Liegt die exe woanders als beim letzten Mal (z. B. Ordner umbenannt), zeigen Autostart und
+/// Startmenü-Verknüpfung noch auf den alten Pfad. Beide werden beim Start neu geschrieben, falls aktiv.
+fn pfade_nachziehen() {
+    if autostart_an() {
+        autostart_setzen(true);
+    }
+    if startmenue::vorhanden("Mausi") {
+        startmenue::setzen("Mausi", true);
     }
 }
 
@@ -1409,6 +1422,8 @@ pub fn starten() {
         if !FindWindowW(name.as_ptr(), null()).is_null() {
             return; // läuft schon
         }
+        zustand::umziehen();
+        pfade_nachziehen();
         let hinst = GetModuleHandleW(null());
         ICON.set(ico_laden(SYMBOLE[3], 32)); // Programm-Icon: hellgrau
         design::laden();

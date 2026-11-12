@@ -10,7 +10,7 @@ Getestet mit der **PRO X Superlight 2** („PRO X 2“) am LIGHTSPEED-Empfänger
 
 ## Download und Start
 
-1. `Mausi.exe` von der [Release-Seite](https://github.com/IcHiAT/mausi/releases/latest) laden und in einen eigenen Ordner legen, z. B. `%LOCALAPPDATA%\Programs\maus\`.
+1. `Mausi.exe` von der [Release-Seite](https://github.com/IcHiAT/mausi/releases/latest) laden und in einen eigenen Ordner legen, z. B. `%LOCALAPPDATA%\Programs\Mausi\`.
 2. Starten. Die exe ist nicht signiert, deshalb kann Windows SmartScreen beim ersten Start warnen („Weitere Informationen“ → „Trotzdem ausführen“).
 3. Im Tray: Rechtsklick auf das Symbol. „Mit Windows starten“ richtet den Autostart ein.
 
@@ -34,7 +34,7 @@ Läuft unter Windows 10/11, keine Installation und kein G HUB nötig. Die Benutz
 - **Eigener DPI-Wert:** Unter Desktop → DPI → „Eigener Wert …“ öffnet sich ein Eingabefeld. Enter übernimmt den Wert, Esc bricht ab.
 - **Live-Hz:** Solange das Menü offen ist, zeigt die zweite Zeile die gemessene Rate, während du die Maus bewegst. Angezeigt wird der Höchstwert der letzten Sekunde. Gemessen wird über Raw Input; das Menü ist dabei im Vordergrund, deshalb drosselt Windows nicht.
 - **DPI-Stufen im Tray-Menü:** Standard sind 400, 800, 1200, 1600, 3200, 6400 und dazu der aktuelle Wert. Eigene Stufen gehen über eine `maus.ini` neben der exe mit der Zeile `dpi = 400, 800, 1600`.
-- **Hz-Anzeige:** Die PRO X 2 meldet nach dem Umstellen immer noch die alte Rate zurück, obwohl die echte Rate wechselt (gemessen). Deshalb merkt sich maus den zuletzt gesetzten Wert in `%LOCALAPPDATA%\maus\zustand.txt` und zeigt diesen an.
+- **Hz-Anzeige:** Die PRO X 2 meldet nach dem Umstellen immer noch die alte Rate zurück, obwohl die echte Rate wechselt (gemessen). Deshalb merkt sich Mausi den zuletzt gesetzten Wert in `%LOCALAPPDATA%\Mausi\zustand.txt` und zeigt diesen an.
 - **Onboard-Modus:** Lehnt die Maus das Setzen mit Fehler 5 ab, steht sie im Onboard-Modus. maus schaltet dann selbst auf Host-Modus (0x8100) und versucht es noch einmal.
 - **G HUB:** Läuft G HUB mit, kann es beim Profilwechsel eigene Werte zurückschreiben.
 - **Fehlersuche:** Mit der Umgebungsvariable `MAUS_DEBUG=1` gibt maus jede HID++-Meldung aus.

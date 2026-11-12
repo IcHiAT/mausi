@@ -121,11 +121,24 @@ fn cli(a: &[String]) -> Result<(), String> {
 pub mod zustand {
     use std::path::PathBuf;
 
-    fn datei() -> Option<PathBuf> {
-        let basis = std::env::var_os("LOCALAPPDATA")
+    fn basis() -> Option<PathBuf> {
+        std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))?;
-        Some(basis.join("maus").join("zustand.txt"))
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    }
+
+    fn datei() -> Option<PathBuf> {
+        umziehen();
+        Some(basis()?.join("Mausi").join("zustand.txt"))
+    }
+
+    /// Alten Datenordner `maus` (bis 0.2.0) einmalig in `Mausi` umbenennen.
+    pub fn umziehen() {
+        let Some(b) = basis() else { return };
+        let (alt, neu) = (b.join("maus"), b.join("Mausi"));
+        if alt.is_dir() && !neu.exists() {
+            let _ = std::fs::rename(alt, neu);
+        }
     }
 
     pub fn hz_lesen(name: &str) -> Option<u32> {

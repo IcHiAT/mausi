@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (12.11.2026)
+
+- Neu: Der Tooltip über dem Tray-Symbol zeigt in der ersten Zeile die Version (z. B. „Mausi 0.2.1“).
+- Geändert: Die Einstellungen liegen jetzt unter `%LOCALAPPDATA%\Mausi` statt `%LOCALAPPDATA%\maus`. Der alte Ordner wird beim ersten Start übernommen. Als Programmordner empfiehlt das README jetzt `%LOCALAPPDATA%\Programs\Mausi`.
+- Verbessert: Wird `Mausi.exe` verschoben, zeigen Autostart und Startmenü-Verknüpfung beim nächsten Start von selbst auf den neuen Ort.
+
 ## 0.2.0 (12.11.2026)
 
 - Neu: Überarbeitete Icons. Das Tray-Symbol folgt der Windows-Taskleiste: Auf dunkler Taskleiste ist es cyan, auf heller schwarz, ohne erreichbare Maus hellgrau. Es passt sich der Bildschirmskalierung an. Das Programm-Icon (Startmenü, Fenster) ist hellgrau.
