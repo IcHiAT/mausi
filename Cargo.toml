@@ -1,6 +1,6 @@
 [package]
 name = "maus"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "DPI und Abfragerate (Hz) von Logitech-Maeusen (HID++) setzen - Tray und Kommandozeile"
 

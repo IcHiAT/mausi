@@ -68,5 +68,5 @@ Mäuse mit diesen Features sollten ohne Änderung laufen, getestet ist aber nur 
 Der Task-Manager zeigt Dateibeschreibung, Herausgeber (`-Firma`, Standard IcHiAT) und Icon der exe, im Autostart-Tab erst nach einigen Sekunden. Der GNU-Toolchain bindet keine Ressourcen ein, deshalb nach jedem Build:
 
 ```powershell
-.\werkzeug\ressourcen.ps1 -Exe .\target\release\maus.exe -Ico .\assets\mausi.ico -Name Mausi -Version 0.1.1
+.\werkzeug\ressourcen.ps1 -Exe .\target\release\maus.exe -Ico .\assets\mausi.ico -Name Mausi -Version 0.2.0
 ```

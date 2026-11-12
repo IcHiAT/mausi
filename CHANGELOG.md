@@ -1,6 +1,6 @@
 # Changelog
 
-## Unveröffentlicht
+## 0.2.0 (12.11.2026)
 
 - Neu: Überarbeitete Icons. Das Tray-Symbol folgt der Windows-Taskleiste: Auf dunkler Taskleiste ist es cyan, auf heller schwarz, ohne erreichbare Maus hellgrau. Es passt sich der Bildschirmskalierung an. Das Programm-Icon (Startmenü, Fenster) ist hellgrau.
 - Neu: Menüpunkt „Tray-Symbol“. Dort lässt sich das Symbol fest wählen, Standard ist „Automatisch“.
