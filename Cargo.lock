@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "maus"
-version = "0.2.1"
+version = "0.2.6"
 dependencies = [
  "hidapi",
  "windows-sys 0.59.0",

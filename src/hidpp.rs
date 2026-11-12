@@ -6,7 +6,7 @@
 use crate::g400s;
 use hidapi::{HidApi, HidDevice};
 use std::cell::Cell;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -33,7 +33,10 @@ enum Rate {
 
 pub struct Maus {
     _api: Rc<HidApi>,
-    dev: HidDevice,
+    /// HID++-Schnittstelle (bei der G400s leer)
+    dev: Option<HidDevice>,
+    /// Zugang zur G400s (bei HID++-Mäusen leer)
+    g4: Option<g400s::Zugang>,
     /// Hersteller- und Produktnummer der HID-Schnittstelle (beim Funkempfänger die des Empfängers)
     pub vid: u16,
     pub pid: u16,
@@ -93,8 +96,6 @@ pub struct Platz {
     pub idx: u8,
 }
 
-const G400S_DPI: &str = "Die DPI der G400s lassen sich nur mit den DPI-Tasten an der Maus umschalten";
-
 /// Platz-Nummer für die G400s (HID++ benutzt 0 nie)
 const G400S: u8 = 0;
 
@@ -128,9 +129,12 @@ pub fn suchen_mit_luecke() -> (Vec<Platz>, bool) {
         }
         luecke |= gefunden.len() == vorher;
     }
-    for info in api.device_list().filter(|i| g400s::schnittstelle(i)) {
-        if Maus::oeffnen(&api, info, G400S).is_some_and(|m| g400s::da(&m.dev)) {
-            gefunden.push(Platz { pfad: info.path().to_owned(), idx: G400S });
+    let mut g4: Vec<CString> = api.device_list().filter(|i| g400s::schnittstelle(i)).map(|i| i.path().to_owned()).collect();
+    #[cfg(windows)]
+    g4.extend(crate::winusb::pfade().into_iter().filter_map(|p| CString::new(p).ok()));
+    for pfad in g4 {
+        if Maus::g400s_oeffnen(&api, &pfad).is_some() {
+            gefunden.push(Platz { pfad, idx: G400S });
         }
     }
     (gefunden, luecke)
@@ -142,14 +146,13 @@ pub fn verbinden(plaetze: &[Platz]) -> Vec<Maus> {
     let api = Rc::new(api);
     let mut v = Vec::new();
     for p in plaetze {
+        if p.idx == G400S {
+            v.extend(Maus::g400s_oeffnen(&api, &p.pfad));
+            continue;
+        }
         let Some(info) = api.device_list().find(|i| i.path() == p.pfad.as_c_str()).cloned() else { continue };
         let Some(mut m) = Maus::oeffnen(&api, &info, p.idx) else { continue };
-        if p.idx == G400S {
-            if g400s::da(&m.dev) {
-                m.name = g400s::NAME.into();
-                v.push(m);
-            }
-        } else if m.einrichten(3) {
+        if m.einrichten(3) {
             v.push(m);
         }
     }
@@ -198,7 +201,8 @@ impl Maus {
         let _ = dev.set_blocking_mode(false);
         Some(Maus {
             _api: api.clone(),
-            dev,
+            dev: Some(dev),
+            g4: None,
             vid: info.vendor_id(),
             pid: info.product_id(),
             pfad: info.path().to_owned(),
@@ -209,6 +213,44 @@ impl Maus {
             rate_f: None,
             akku_f: None,
         })
+    }
+
+    /// G400s über ihre HID-Schnittstelle oder, falls eingerichtet, über WinUSB öffnen
+    fn g400s_oeffnen(api: &Rc<HidApi>, pfad: &CStr) -> Option<Maus> {
+        let zugang = match api.device_list().find(|i| i.path() == pfad) {
+            Some(info) => g400s::Zugang::Hid(info.open_device(api).ok()?),
+            #[cfg(windows)]
+            None => g400s::Zugang::Usb(crate::winusb::Usb::oeffnen(pfad.to_str().ok()?)?),
+            #[cfg(not(windows))]
+            None => return None,
+        };
+        if !zugang.da() {
+            return None;
+        }
+        Some(Maus {
+            _api: api.clone(),
+            dev: None,
+            g4: Some(zugang),
+            vid: g400s::VID,
+            pid: g400s::PID,
+            pfad: pfad.to_owned(),
+            idx: G400S,
+            swid: Cell::new(1),
+            name: g400s::NAME.into(),
+            dpi_f: None,
+            rate_f: None,
+            akku_f: None,
+        })
+    }
+
+    /// HID++-Schnittstelle (nur bei HID++-Mäusen aufgerufen)
+    fn hid(&self) -> &HidDevice {
+        self.dev.as_ref().expect("HID++-Schnittstelle")
+    }
+
+    /// Zugang zur G400s (nur bei der G400s aufgerufen)
+    fn g4(&self) -> &g400s::Zugang {
+        self.g4.as_ref().expect("G400s-Zugang")
     }
 
     /// Gleiche Maus? (gleiche Schnittstelle, gleicher Platz)
@@ -239,13 +281,13 @@ impl Maus {
     fn wer_antwortet(&self) -> Vec<u8> {
         const PLAETZE: [u8; 7] = [0xFF, 1, 2, 3, 4, 5, 6];
         let mut buf = [0u8; 20];
-        while self.dev.read(&mut buf).unwrap_or(0) > 0 {}
+        while self.hid().read(&mut buf).unwrap_or(0) > 0 {}
         let mut da: Vec<u8> = Vec::new();
         let pingen = |da: &Vec<u8>| {
             for idx in PLAETZE.iter().filter(|i| !da.contains(i)) {
                 let mut msg = [0u8; 20];
                 msg[..4].copy_from_slice(&[0x11, *idx, 0, 0x1F]);
-                let _ = self.dev.write(&msg);
+                let _ = self.hid().write(&msg);
             }
         };
         let start = Instant::now();
@@ -256,7 +298,7 @@ impl Maus {
                 nochmal = false; // Funk verliert gelegentlich eine Meldung
                 pingen(&da);
             }
-            match self.dev.read(&mut buf) {
+            match self.hid().read(&mut buf) {
                 Ok(n) if n >= 7 && buf[0] == 0x11 && buf[2] == 0 && buf[3] == 0x1F && PLAETZE.contains(&buf[1]) => {
                     if !da.contains(&buf[1]) {
                         da.push(buf[1]);
@@ -280,7 +322,7 @@ impl Maus {
     /// deshalb zählt auch eine verspätete Antwort auf einen früheren Ping.
     fn anpingen(&self, versuche: usize) -> bool {
         let mut buf = [0u8; 20];
-        while self.dev.read(&mut buf).unwrap_or(0) > 0 {} // alte Meldungen verwerfen
+        while self.hid().read(&mut buf).unwrap_or(0) > 0 {} // alte Meldungen verwerfen
         let antwort = |buf: &[u8; 20], n: usize| n >= 7 && buf[0] == 0x11 && buf[1] == self.idx && buf[2] == 0 && buf[3] >> 4 == 1;
         let dbg = std::env::var_os("MAUS_DEBUG").is_some();
         for i in 0..versuche {
@@ -288,7 +330,7 @@ impl Maus {
             self.swid.set(sw);
             let mut msg = [0u8; 20];
             msg[..4].copy_from_slice(&[0x11, self.idx, 0, 0x10 | sw]);
-            let w = self.dev.write(&msg);
+            let w = self.hid().write(&msg);
             if dbg { eprintln!("ping {:02x} {:?}", self.idx, w); }
             if w.is_err() {
                 return false;
@@ -297,7 +339,7 @@ impl Maus {
             let ms = if i + 1 == versuche { 1500 } else { 250 };
             let ende = Instant::now() + Duration::from_millis(ms);
             while Instant::now() < ende {
-                match self.dev.read(&mut buf) {
+                match self.hid().read(&mut buf) {
                     Ok(n) if antwort(&buf, n) => return true,
                     Ok(0) => std::thread::sleep(Duration::from_millis(1)),
                     Ok(_) => {}
@@ -312,7 +354,7 @@ impl Maus {
         let mut buf = [0u8; 20];
         for _ in 0..64 {
             // alte Meldungen verwerfen
-            if self.dev.read(&mut buf).unwrap_or(0) == 0 {
+            if self.hid().read(&mut buf).unwrap_or(0) == 0 {
                 break;
             }
         }
@@ -323,12 +365,12 @@ impl Maus {
         msg[..4].copy_from_slice(&[0x11, self.idx, f, fs]);
         msg[4..4 + p.len()].copy_from_slice(p);
         let dbg = std::env::var_os("MAUS_DEBUG").is_some();
-        let w = self.dev.write(&msg);
+        let w = self.hid().write(&msg);
         if dbg { eprintln!("-> {:02x?} {:?}", &msg[..8], w); }
         w.map_err(|e| format!("Senden fehlgeschlagen: {e}"))?;
         let ende = Instant::now() + Duration::from_millis(ms);
         while Instant::now() < ende {
-            let n = self.dev.read(&mut buf);
+            let n = self.hid().read(&mut buf);
             if matches!(n, Ok(0)) {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
@@ -379,14 +421,24 @@ impl Maus {
 
     // ---------- DPI ----------
 
-    /// Kann Mausi die DPI dieser Maus ändern? (Bei der G400s nur anzeigen.)
+    /// Kann Mausi die DPI dieser Maus ändern? (G400s nur mit WinUSB, sonst nur anzeigen.)
     pub fn dpi_einstellbar(&self) -> bool {
-        self.idx != G400S
+        self.idx != G400S || self.g4().dpi_einstellbar()
+    }
+
+    /// Ist das eine G400s? (für „DPI einstellbar machen …“)
+    pub fn ist_g400s(&self) -> bool {
+        self.idx == G400S
+    }
+
+    /// Feste DPI-Stufen (G400s); None = beliebige Werte im Bereich
+    pub fn dpi_stufen(&self) -> Option<Vec<u32>> {
+        (self.idx == G400S).then(g400s::dpi_stufen)
     }
 
     pub fn dpi(&self) -> Result<u32, String> {
         if self.idx == G400S {
-            return g400s::dpi(&self.dev);
+            return self.g4().dpi();
         }
         match self.dpi_f.ok_or("DPI nicht unterstützt")? {
             Dpi::Ext(f) => {
@@ -403,7 +455,7 @@ impl Maus {
     /// DPI mit einem einzigen kurzen Versuch (für das offene Menü). None = keine Antwort in der Zeit.
     pub fn dpi_schnell(&self) -> Option<u32> {
         if self.idx == G400S {
-            return g400s::dpi(&self.dev).ok();
+            return self.g4().dpi().ok();
         }
         let (f, func) = match self.dpi_f? {
             Dpi::Ext(f) => (f, 5),
@@ -416,7 +468,8 @@ impl Maus {
     /// (kleinster, größter) DPI-Wert des Sensors
     pub fn dpi_bereich(&self) -> Result<(u32, u32), String> {
         if self.idx == G400S {
-            return Err(G400S_DPI.into());
+            let s = g400s::dpi_stufen();
+            return Ok((s[0], s[s.len() - 1]));
         }
         let werte = match self.dpi_f.ok_or("DPI nicht unterstützt")? {
             Dpi::Ext(f) => {
@@ -444,7 +497,7 @@ impl Maus {
 
     pub fn set_dpi(&self, v: u32) -> Result<(), String> {
         if self.idx == G400S {
-            return Err(G400S_DPI.into());
+            return self.g4().set_dpi(v);
         }
         let (min, max) = self.dpi_bereich()?;
         if v < min || v > max {
@@ -524,7 +577,7 @@ impl Maus {
     /// nach dem Setzen auf dem alten Stand stehen, obwohl die echte Rate wechselt.
     pub fn hz(&self) -> Result<u32, String> {
         if self.idx == G400S {
-            return g400s::hz(&self.dev);
+            return self.g4().hz();
         }
         match self.rate_f.ok_or("Abfragerate nicht unterstützt")? {
             Rate::Ext(f) => {
@@ -541,7 +594,7 @@ impl Maus {
 
     pub fn set_hz(&self, hz: u32) -> Result<(), String> {
         if self.idx == G400S {
-            return g400s::set_hz(&self.dev, hz);
+            return self.g4().set_hz(hz);
         }
         let raten = self.raten()?;
         if !raten.contains(&hz) {

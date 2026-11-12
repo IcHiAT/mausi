@@ -1,4 +1,4 @@
-//! Tray-Symbol mit Menü: DPI-Stufen + eigener Wert, Abfragerate, Live-Messung, Autostart.
+//! Tray-Symbol mit Menü: Hz-Messung, DPI-Stufen + eigener Wert, Hz, Autostart.
 //! Mehrere Mäuse: jede bekommt ein eigenes Untermenü mit ihren Einstellungen.
 
 use crate::design;
@@ -21,12 +21,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_EINBLENDEN: u32 = WM_APP + 2;
 const WM_GEFUNDEN: u32 = WM_APP + 3;
+/// WinUSB-Einrichtung (Admin-Lauf) ist fertig
+const WM_WINUSB: u32 = WM_APP + 4;
 // Allgemeine Menüpunkte
 const ID_AUTO: usize = 3;
 const ID_NEU: usize = 4;
 const ID_ENDE: usize = 9;
 const ID_DESIGN: usize = 11;
 const ID_STARTMENUE: usize = 12;
+/// Hz-Messung im Hauptmenü (oben), per Klick an und aus
+const ID_MESSEN: usize = 13;
+/// Einträge im Hauptmenü vor den Mäusen: Messzeile und Trennstrich
+const VOR_MAEUSEN: u32 = 2;
 const ID_SYMBOL: usize = 5000;
 // Menüpunkte je Maus: GERAET * (Nummer + 1) + lokale ID
 const GERAET: usize = 10000;
@@ -35,20 +41,21 @@ const ID_HZ: usize = 2000;
 const ID_VDPI: usize = 3000;
 const ID_VHZ: usize = 4000;
 const ID_DPI_EIGEN: usize = 5;
-const ID_LIVE: usize = 6;
 const ID_VDPI_AUS: usize = 7;
 const ID_VDPI_EIGEN: usize = 8;
 const ID_VHZ_AUS: usize = 10;
 const ID_DPI_INFO: usize = 9;
+/// G400s: WinUSB einrichten, damit sich die DPI setzen lassen
+const ID_WINUSB: usize = 11;
 const MAX_GERAETE: usize = 8;
-// Messzeilen der Mäuse, die Mausi nicht einstellen kann
-const ID_FREMD_LIVE: usize = 90000;
 const ID_EDIT: usize = 101;
 const TIMER_LIVE: usize = 1;
 const TIMER_AKKU: usize = 2;
 const TIMER_VOLL: usize = 3;
 const TIMER_GERAETE: usize = 4;
 const TIMER_SUCHE: usize = 5;
+/// G400s: DPI-Stufe nachsehen, die Maus meldet einen Tastendruck nicht von selbst
+const TIMER_G400S: usize = 6;
 const AKKU_WARNUNG: u8 = 10;
 const EM_SETSEL: u32 = 0x00B1;
 const COLOR_BTNFACE: i32 = 15;
@@ -113,13 +120,11 @@ fn kennung(vid: u16, pid: u16) -> u32 {
     (vid as u32) << 16 | pid as u32
 }
 
-/// Live-Messung einer Maus
+/// Live-Messung einer Maus (nach Hersteller und Produkt)
 struct Messung {
-    id: usize,
     kennung: u32,
     zaehler: u32,
     verlauf: [u32; 4], // letzte 4 Viertelsekunden
-    text: String,      // zuletzt angezeigt: nur bei Änderung neu zeichnen
 }
 
 /// Eine einstellbare Maus im offenen Menü: DPI nachsehen, falls sie an der Maus umgestellt wird.
@@ -130,10 +135,15 @@ struct LiveDpi {
     liste: Vec<u32>,
 }
 
-/// Live-Messung: zählt Raw-Input-Meldungen je Maus, solange das Menü offen ist.
+/// Solange das Menü offen ist: DPI nachsehen und, wenn eingeschaltet, Raw-Input-Meldungen je Maus zählen.
 struct Live {
     menu: HMENU,
+    messen: bool,
     messungen: Vec<Messung>,
+    /// Kennung -> Name, für die Anzeige der gerade bewegten Maus
+    namen: Vec<(u32, String)>,
+    /// zuletzt angezeigter Text der Messzeile: nur bei Änderung neu zeichnen
+    text: String,
     start: Instant,
     pos: usize,
     // Raw-Input-Gerät -> Kennung (Gerätename nur einmal nachschlagen)
@@ -156,6 +166,8 @@ thread_local! {
     static LIVE: RefCell<Option<Live>> = RefCell::new(None);
     static GEWARNT: Cell<bool> = Cell::new(false);
     static MENU_OFFEN: Cell<bool> = Cell::new(false);
+    /// Hz-Messung eingeschaltet: gilt nur, solange das Menü offen ist
+    static MESSEN: Cell<bool> = Cell::new(false);
 }
 
 /// Ergebnis der Suche aus dem Hintergrund-Thread
@@ -199,6 +211,19 @@ fn suche_uebernehmen() {
     });
 }
 
+static WINUSB_ERGEBNIS: std::sync::Mutex<Option<Result<(), String>>> = std::sync::Mutex::new(None);
+
+/// G400s: WinUSB als Administrator einrichten (UAC-Abfrage), danach neu suchen.
+fn winusb_starten() {
+    // Die offene HID-Verbindung zur G400s schließen, sonst kann Windows den Treiber nicht tauschen
+    APP.with(|c| c.borrow_mut().geraete.retain(|g| !g.maus.ist_g400s()));
+    let hwnd = HAUPT.get() as isize;
+    std::thread::spawn(move || {
+        *WINUSB_ERGEBNIS.lock().unwrap() = Some(crate::winusb::als_admin("winusb ein"));
+        unsafe { PostMessageW(hwnd as HWND, WM_WINUSB, 0, 0) };
+    });
+}
+
 // ---------- Stand der Mäuse ----------
 
 #[derive(Clone)]
@@ -209,8 +234,12 @@ struct Stand {
     raten: Vec<u32>,
     dpi_liste: Vec<u32>,
     dpi_bereich: (u32, u32),
-    /// DPI nur anzeigen, nicht ändern (G400s)
+    /// DPI nur anzeigen, nicht ändern (G400s ohne WinUSB)
     dpi_fest: bool,
+    /// Nur feste DPI-Stufen, kein eigener Wert (G400s)
+    dpi_stufen: bool,
+    /// G400s: bietet „DPI einstellbar machen …“ an, solange `dpi_fest`
+    g400s: bool,
     akku: Option<(u8, bool)>,
 }
 
@@ -234,8 +263,11 @@ fn stand_von(g: &Geraet, presets: &[u32]) -> Option<Stand> {
     }
     let dpi_fest = !m.dpi_einstellbar();
     let (min, max) = m.dpi_bereich().unwrap_or((0, 0));
-    let mut dpi_liste: Vec<u32> = presets.iter().copied().filter(|&v| v >= min && v <= max).collect();
-    if let (Some(d), false) = (dpi, dpi_fest) {
+    let stufen = m.dpi_stufen();
+    let dpi_stufen = stufen.is_some();
+    let mut dpi_liste: Vec<u32> =
+        stufen.unwrap_or_else(|| presets.iter().copied().filter(|&v| v >= min && v <= max).collect());
+    if let (Some(d), false, false) = (dpi, dpi_fest, dpi_stufen) {
         if !dpi_liste.contains(&d) {
             dpi_liste.push(d);
             dpi_liste.sort();
@@ -243,7 +275,7 @@ fn stand_von(g: &Geraet, presets: &[u32]) -> Option<Stand> {
     }
     let hz = if m.hz_lesewert_unsicher() { g.hz_gesetzt.or_else(|| m.hz().ok()) } else { m.hz().ok() };
     let akku = m.akku().ok();
-    Some(Stand { name: m.name.clone(), dpi, hz, raten, dpi_liste, dpi_bereich: (min, max), dpi_fest, akku })
+    Some(Stand { name: m.name.clone(), dpi, hz, raten, dpi_liste, dpi_bereich: (min, max), dpi_fest, dpi_stufen, g400s: m.ist_g400s(), akku })
 }
 
 /// Alle Mäuse vollständig abfragen und den Stand merken (kann bei schlafender Maus dauern).
@@ -260,7 +292,7 @@ fn auffrischen() {
 
 fn dpi_eintragen(s: &mut Stand, d: u32) {
     s.dpi = Some(d);
-    if !s.dpi_fest && !s.dpi_liste.contains(&d) {
+    if !s.dpi_fest && !s.dpi_stufen && !s.dpi_liste.contains(&d) {
         s.dpi_liste.push(d);
         s.dpi_liste.sort();
     }
@@ -343,6 +375,11 @@ unsafe fn breit_gleich(p: *const u16, text: &str) -> bool {
 
 unsafe fn tip_aktualisieren(hwnd: HWND, aktion: u32) -> Vec<Eintrag> {
     auffrischen();
+    tip_zeigen(hwnd, aktion)
+}
+
+/// Tooltip und Symbol aus dem gemerkten Stand, ohne die Mäuse abzufragen
+unsafe fn tip_zeigen(hwnd: HWND, aktion: u32) -> Vec<Eintrag> {
     let liste = uebersicht();
     let inhalt = if liste.is_empty() {
         if APP.with(|c| c.borrow().suche_laeuft) { "suche Maus …".to_string() } else { "keine einstellbare Maus gefunden".to_string() }
@@ -361,6 +398,48 @@ unsafe fn tip_aktualisieren(hwnd: HWND, aktion: u32) -> Vec<Eintrag> {
         }
     }
     liste
+}
+
+/// Mit MAUS_DEBUG=1: G400s-Abfrage nach %LOCALAPPDATA%\Mausi\g400s.txt schreiben
+fn g4_protokoll(t: &str) {
+    if std::env::var_os("MAUS_DEBUG").is_none() {
+        return;
+    }
+    let Some(d) = std::env::var_os("LOCALAPPDATA") else { return };
+    let p = std::path::Path::new(&d).join("Mausi").join("g400s.txt");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        use std::io::Write;
+        let _ = writeln!(f, "{t}");
+    }
+}
+
+/// G400s: Wurde die DPI-Stufe an der Maus umgeschaltet, Stand merken und einblenden.
+unsafe fn g400s_nachsehen(hwnd: HWND) {
+    let neu = APP.with(|c| {
+        let mut a = c.borrow_mut();
+        for (k, g) in a.geraete.iter_mut().enumerate() {
+            if !g.maus.ist_g400s() {
+                continue;
+            }
+            let gelesen = g.maus.dpi_schnell();
+            g4_protokoll(&format!("{:?} k={k} stand={:?} gelesen={gelesen:?}", std::time::SystemTime::now(), g.stand.as_ref().map(|s| s.dpi)));
+            let Some(s) = g.stand.as_mut() else { continue };
+            match gelesen {
+                Some(d) if s.dpi.is_some() && s.dpi != Some(d) => {
+                    dpi_eintragen(s, d);
+                    return Some(k);
+                }
+                _ => {}
+            }
+        }
+        None
+    });
+    // Sofort einblenden; nicht alle Mäuse neu abfragen, eine schlafende Funkmaus hält sonst sekundenlang auf
+    if let Some(k) = neu {
+        let st = APP.with(|c| c.borrow().geraete.get(k).and_then(|g| g.stand.clone()));
+        einblenden(st.as_ref());
+        tip_zeigen(hwnd, NIM_MODIFY);
+    }
 }
 
 /// DPI/Hz am rechten Bildschirmrand einblenden.
@@ -648,15 +727,18 @@ unsafe fn melden(hwnd: HWND, text: &str) {
 // ---------- Live-Messung ----------
 
 const LIVE_LEER: &str = "Gemessen: Maus bewegen …";
+const MESSEN_AUS: &str = "Hz messen";
 
-unsafe fn live_starten(hwnd: HWND, menu: HMENU, messungen: Vec<(usize, u32)>, dpi: Vec<LiveDpi>) {
-    let rid = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
-    RegisterRawInputDevices(&rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
-    let messungen = messungen
-        .into_iter()
-        .map(|(id, kennung)| Messung { id, kennung, zaehler: 0, verlauf: [0; 4], text: LIVE_LEER.to_string() })
-        .collect();
-    LIVE.with(|l| *l.borrow_mut() = Some(Live { menu, messungen, start: Instant::now(), pos: 0, zuordnung: Vec::new(), dpi, takt: 0 }));
+unsafe fn live_starten(hwnd: HWND, menu: HMENU, messen: bool, namen: Vec<(u32, String)>, dpi: Vec<LiveDpi>) {
+    if messen {
+        let rid = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd };
+        RegisterRawInputDevices(&rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+    }
+    let live = Live {
+        menu, messen, messungen: Vec::new(), namen, text: LIVE_LEER.to_string(),
+        start: Instant::now(), pos: 0, zuordnung: Vec::new(), dpi, takt: 0,
+    };
+    LIVE.with(|l| *l.borrow_mut() = Some(live));
     SetTimer(hwnd, TIMER_LIVE, 250, None);
 }
 
@@ -698,6 +780,9 @@ unsafe fn live_zaehlen(lp: LPARAM) {
     LIVE.with(|l| {
         let mut l = l.borrow_mut();
         let Some(l) = l.as_mut() else { return };
+        if !l.messen {
+            return;
+        }
         let k = match l.zuordnung.iter().find(|(h, _)| *h == kopf.hDevice) {
             Some(&(_, k)) => k,
             None => {
@@ -706,8 +791,9 @@ unsafe fn live_zaehlen(lp: LPARAM) {
                 k
             }
         };
-        for m in l.messungen.iter_mut().filter(|m| m.kennung == k) {
-            m.zaehler += 1;
+        match l.messungen.iter_mut().find(|m| m.kennung == k) {
+            Some(m) => m.zaehler += 1,
+            None => l.messungen.push(Messung { kennung: k, zaehler: 1, verlauf: [0; 4] }),
         }
     });
 }
@@ -775,16 +861,29 @@ unsafe fn live_takt() {
         let pos = l.pos;
         l.pos = (l.pos + 1) % 4;
         l.takt += 1;
-        let mut texte: Vec<(usize, String)> = Vec::new();
+        // Angezeigt wird die Maus, die gerade bewegt wird: höchste Rate der letzten Sekunde
+        // (Höchstwert, weil die Maus beim Abbremsen weniger sendet)
+        let mut beste: Option<(u32, u32)> = None;
         for m in l.messungen.iter_mut() {
             m.verlauf[pos] = (m.zaehler as f32 / sek).round() as u32;
             m.zaehler = 0;
-            // Höchstwert der letzten Sekunde: beim Abbremsen sendet die Maus weniger
             let best = *m.verlauf.iter().max().unwrap();
-            let t = if best < 20 { LIVE_LEER.to_string() } else { format!("Gemessen: {} Hz", rate_runden(best)) };
-            if t != m.text {
-                m.text = t.clone();
-                texte.push((m.id, t));
+            if best >= 20 && beste.map_or(true, |(b, _)| best > b) {
+                beste = Some((best, m.kennung));
+            }
+        }
+        let mut texte: Vec<(usize, String)> = Vec::new();
+        if l.messen {
+            let t = match beste {
+                None => LIVE_LEER.to_string(),
+                Some((hz, k)) => match l.namen.iter().find(|(kk, _)| *kk == k) {
+                    Some((_, n)) => format!("Gemessen: {} Hz – {n}", rate_runden(hz)),
+                    None => format!("Gemessen: {} Hz", rate_runden(hz)),
+                },
+            };
+            if t != l.text {
+                l.text = t.clone();
+                texte.push((ID_MESSEN, t));
             }
         }
         // DPI jede halbe Sekunde nachsehen
@@ -825,9 +924,10 @@ unsafe fn live_takt() {
                 }
             }
         });
-        // Kopfzeile bzw. Untermenü-Titel der Maus steht im Hauptmenü an Position k
-        eintrag_text(menu, lg.k as u32, &kopf_text);
-        eintrag_malen(menu, lg.k as u32);
+        // Kopfzeile bzw. Untermenü-Titel der Maus steht im Hauptmenü nach Messzeile und Trennstrich
+        let pos = VOR_MAEUSEN + lg.k as u32;
+        eintrag_text(menu, pos, &kopf_text);
+        eintrag_malen(menu, pos);
         let basis = GERAET * (lg.k + 1);
         if fest {
             if let Some((m, pos)) = eintrag_finden(menu, (basis + ID_DPI_INFO) as u32) {
@@ -987,22 +1087,25 @@ struct Angebot {
     vdpi: Vec<u32>,
 }
 
-/// Messzeile, Desktop- und Vollbild-Untermenü einer Maus an `ziel` anhängen.
+/// Desktop- und Vollbild-Untermenü einer Maus an `ziel` anhängen.
 unsafe fn geraet_einfuegen(ziel: HMENU, k: usize, s: &Stand) -> Angebot {
     let basis = GERAET * (k + 1);
-    AppendMenuW(ziel, MF_STRING | MF_GRAYED, basis + ID_LIVE, w(LIVE_LEER).as_ptr());
-    AppendMenuW(ziel, MF_SEPARATOR, 0, null());
     let desk = CreatePopupMenu();
     if s.dpi_fest {
         AppendMenuW(desk, MF_STRING | MF_GRAYED, basis + ID_DPI_INFO, w(&dpi_info(s.dpi)).as_ptr());
+        if s.g400s {
+            AppendMenuW(desk, MF_STRING, basis + ID_WINUSB, w("DPI einstellbar machen …").as_ptr());
+        }
     } else if s.dpi.is_some() {
         let sub = CreatePopupMenu();
         for (i, &v) in s.dpi_liste.iter().enumerate() {
             let f = if Some(v) == s.dpi { MF_CHECKED } else { 0 };
             AppendMenuW(sub, MF_STRING | f, basis + ID_DPI + i, w(&format!("{v} DPI")).as_ptr());
         }
-        AppendMenuW(sub, MF_SEPARATOR, 0, null());
-        AppendMenuW(sub, MF_STRING, basis + ID_DPI_EIGEN, w("Eigener Wert …").as_ptr());
+        if !s.dpi_stufen {
+            AppendMenuW(sub, MF_SEPARATOR, 0, null());
+            AppendMenuW(sub, MF_STRING, basis + ID_DPI_EIGEN, w("Eigener Wert …").as_ptr());
+        }
         AppendMenuW(desk, MF_POPUP, sub as usize, w("DPI").as_ptr());
     }
     if !s.raten.is_empty() {
@@ -1011,7 +1114,7 @@ unsafe fn geraet_einfuegen(ziel: HMENU, k: usize, s: &Stand) -> Angebot {
             let f = if Some(v) == s.hz { MF_CHECKED } else { 0 };
             AppendMenuW(sub, MF_STRING | f, basis + ID_HZ + i, w(&format!("{v} Hz")).as_ptr());
         }
-        AppendMenuW(desk, MF_POPUP, sub as usize, w("Abfragerate").as_ptr());
+        AppendMenuW(desk, MF_POPUP, sub as usize, w("Hz").as_ptr());
     }
     AppendMenuW(ziel, MF_POPUP, desk as usize, w("Desktop").as_ptr());
 
@@ -1036,8 +1139,10 @@ unsafe fn geraet_einfuegen(ziel: HMENU, k: usize, s: &Stand) -> Angebot {
             let f = if Some(v) == sd { MF_CHECKED } else { 0 };
             AppendMenuW(sub, MF_STRING | f, basis + ID_VDPI + i, w(&format!("{v} DPI")).as_ptr());
         }
-        AppendMenuW(sub, MF_SEPARATOR, 0, null());
-        AppendMenuW(sub, MF_STRING, basis + ID_VDPI_EIGEN, w("Eigener Wert …").as_ptr());
+        if !s.dpi_stufen {
+            AppendMenuW(sub, MF_SEPARATOR, 0, null());
+            AppendMenuW(sub, MF_STRING, basis + ID_VDPI_EIGEN, w("Eigener Wert …").as_ptr());
+        }
         AppendMenuW(voll, MF_POPUP, sub as usize, w("DPI").as_ptr());
     }
     if !s.raten.is_empty() {
@@ -1049,7 +1154,7 @@ unsafe fn geraet_einfuegen(ziel: HMENU, k: usize, s: &Stand) -> Angebot {
             let f = if Some(v) == sh { MF_CHECKED } else { 0 };
             AppendMenuW(sub, MF_STRING | f, basis + ID_VHZ + i, w(&format!("{v} Hz")).as_ptr());
         }
-        AppendMenuW(voll, MF_POPUP, sub as usize, w("Abfragerate").as_ptr());
+        AppendMenuW(voll, MF_POPUP, sub as usize, w("Hz").as_ptr());
     }
     let titel = if im { "Vollbild (Spiel) – gerade aktiv" } else { "Vollbild (Spiel)" };
     AppendMenuW(ziel, MF_POPUP, voll as usize, w(titel).as_ptr());
@@ -1062,34 +1167,42 @@ unsafe fn menu_zeigen(hwnd: HWND) {
     if MENU_OFFEN.replace(true) {
         return;
     }
-    menu_zeigen_innen(hwnd);
+    // Klick auf „Hz messen“ öffnet das Menü an derselben Stelle neu, mit Messung an bzw. aus.
+    // Beim nächsten Öffnen ist sie wieder aus.
+    let mut p = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut p);
+    while menu_zeigen_innen(hwnd, p) {}
+    MESSEN.set(false);
     MENU_OFFEN.set(false);
 }
 
-unsafe fn menu_zeigen_innen(hwnd: HWND) {
+/// Zeigt das Menü und führt den gewählten Punkt aus. `true` = Menü erneut zeigen.
+unsafe fn menu_zeigen_innen(hwnd: HWND, p: POINT) -> bool {
     schnell_auffrischen();
     let liste = uebersicht();
-    let (fremde, suche): (Vec<(String, u32)>, bool) = APP.with(|c| {
+    let (mut namen, suche): (Vec<(u32, String)>, bool) = APP.with(|c| {
         let a = c.borrow();
-        (a.fremde.iter().map(|f| (f.name.clone(), kennung(f.vid, f.pid))).collect(), a.suche_laeuft)
+        (a.fremde.iter().map(|f| (kennung(f.vid, f.pid), f.name.clone())).collect(), a.suche_laeuft)
     });
+    namen.extend(liste.iter().map(|e| (e.kennung, e.name.clone())));
     let menu = CreatePopupMenu();
+    let messen = MESSEN.get();
+    let (t, f) = if messen { (LIVE_LEER, MF_CHECKED) } else { (MESSEN_AUS, 0) };
+    AppendMenuW(menu, MF_STRING | f, ID_MESSEN, w(t).as_ptr());
+    AppendMenuW(menu, MF_SEPARATOR, 0, null());
     let mut angebote: Vec<Angebot> = Vec::new();
-    let mut messungen: Vec<(usize, u32)> = Vec::new();
     let mut live_dpi: Vec<LiveDpi> = Vec::new();
-    // Eine Maus ohne weitere: Einstellungen direkt im Hauptmenü wie bisher
-    let flach = liste.len() == 1 && fremde.is_empty();
+    // Eine Maus: Einstellungen direkt im Hauptmenü
+    let flach = liste.len() == 1;
     for (k, e) in liste.iter().enumerate() {
         match &e.stand {
             Some(s) if flach => {
                 AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w(&kopf(s)).as_ptr());
                 angebote.push(geraet_einfuegen(menu, k, s));
-                messungen.push((GERAET * (k + 1) + ID_LIVE, e.kennung));
             }
             Some(s) => {
                 let sub = CreatePopupMenu();
                 angebote.push(geraet_einfuegen(sub, k, s));
-                messungen.push((GERAET * (k + 1) + ID_LIVE, e.kennung));
                 AppendMenuW(menu, MF_POPUP, sub as usize, w(&kopf(s)).as_ptr());
             }
             None => {
@@ -1100,13 +1213,6 @@ unsafe fn menu_zeigen_innen(hwnd: HWND) {
         if let Some(s) = &e.stand {
             live_dpi.push(LiveDpi { k, dpi: s.dpi, liste: angebote[k].dpi.clone() });
         }
-    }
-    for (j, (name, k)) in fremde.iter().enumerate() {
-        let sub = CreatePopupMenu();
-        AppendMenuW(sub, MF_STRING | MF_GRAYED, ID_FREMD_LIVE + j, w(LIVE_LEER).as_ptr());
-        AppendMenuW(sub, MF_STRING | MF_GRAYED, 0, w("DPI und Hz kann Mausi hier nicht einstellen").as_ptr());
-        AppendMenuW(menu, MF_POPUP, sub as usize, w(&format!("{name} – nur messen")).as_ptr());
-        messungen.push((ID_FREMD_LIVE + j, *k));
     }
     if liste.is_empty() {
         let t = if suche { "Suche Maus …" } else { "Keine einstellbare Maus gefunden" };
@@ -1135,17 +1241,10 @@ unsafe fn menu_zeigen_innen(hwnd: HWND) {
     if design::schwarz() {
         design::menu_schwarz(menu);
     }
-    let mut p = POINT { x: 0, y: 0 };
-    GetCursorPos(&mut p);
     SetForegroundWindow(hwnd);
-    let messen = !messungen.is_empty();
-    if messen {
-        live_starten(hwnd, menu, messungen, live_dpi);
-    }
+    live_starten(hwnd, menu, messen, namen, live_dpi);
     let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, null());
-    if messen {
-        live_stoppen(hwnd);
-    }
+    live_stoppen(hwnd);
     DestroyMenu(menu);
     design::menu_fertig();
     PostMessageW(hwnd, WM_NULL, 0, 0);
@@ -1155,7 +1254,11 @@ unsafe fn menu_zeigen_innen(hwnd: HWND) {
     let ergebnis = match cmd {
         ID_ENDE => {
             DestroyWindow(hwnd);
-            return;
+            return false;
+        }
+        ID_MESSEN => {
+            MESSEN.set(!messen);
+            return true;
         }
         ID_AUTO => {
             autostart_setzen(auto == 0);
@@ -1175,23 +1278,27 @@ unsafe fn menu_zeigen_innen(hwnd: HWND) {
         }
         c if (ID_SYMBOL..ID_SYMBOL + SYMBOL_NAMEN.len()).contains(&c) => {
             let nr = c - ID_SYMBOL;
-            zustand::merken(SYMBOL_SCHLUESSEL, (nr != 0).then_some(nr as u32));
+            zustand::merken(SYMBOL_SCHLUESSEL, (nr != 0).then_some(SYMBOL_WERTE[nr]));
             Ok(())
         }
         c if (GERAET..GERAET * (MAX_GERAETE + 1)).contains(&c) => {
             let k = c / GERAET - 1;
-            let (Some(e), Some(an)) = (liste.get(k), angebote.get(k)) else { return };
-            let Some(s) = &e.stand else { return };
+            let (Some(e), Some(an)) = (liste.get(k), angebote.get(k)) else { return false };
+            let Some(s) = &e.stand else { return false };
             let name_im_titel = (!flach).then_some(e.name.as_str());
             match c % GERAET {
                 ID_DPI_EIGEN => {
                     eingabe_zeigen(k, name_im_titel, s.dpi, s.dpi_bereich, false);
-                    return;
+                    return false;
                 }
                 ID_VDPI_EIGEN => {
                     let sd = APP.with(|c| c.borrow().geraete.get(k).and_then(|g| g.spiel_dpi));
                     eingabe_zeigen(k, name_im_titel, sd.or(s.dpi), s.dpi_bereich, true);
-                    return;
+                    return false;
+                }
+                ID_WINUSB => {
+                    winusb_starten();
+                    Ok(())
                 }
                 ID_VDPI_AUS => {
                     spiel_merken(k, Some(None), None);
@@ -1228,10 +1335,10 @@ unsafe fn menu_zeigen_innen(hwnd: HWND) {
                     gewechselt = r.is_ok().then_some(k);
                     r
                 }
-                _ => return,
+                _ => return false,
             }
         }
-        _ => return,
+        _ => return false,
     };
     if let Err(e) = ergebnis {
         melden(hwnd, &e);
@@ -1240,6 +1347,7 @@ unsafe fn menu_zeigen_innen(hwnd: HWND) {
     if let Some(k) = gewechselt {
         einblenden(liste.get(k).and_then(|e| e.stand.as_ref()));
     }
+    false
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1262,6 +1370,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             let liste = tip_aktualisieren(hwnd, NIM_MODIFY);
             einblenden(liste.iter().find_map(|e| e.stand.as_ref()));
+            0
+        }
+        WM_WINUSB => {
+            if let Some(Err(e)) = WINUSB_ERGEBNIS.lock().unwrap().take() {
+                melden(hwnd, &format!("G400s: DPI einstellbar machen hat nicht geklappt.
+
+{e}"));
+            }
+            suche_starten();
             0
         }
         WM_GEFUNDEN => {
@@ -1304,6 +1421,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_TIMER if wp == TIMER_G400S => {
+            // Bei offenem Menü sieht die Live-Abfrage nach
+            if !MENU_OFFEN.get() {
+                g400s_nachsehen(hwnd);
+            }
+            0
+        }
         WM_TIMER if wp == TIMER_AKKU => {
             tip_aktualisieren(hwnd, NIM_MODIFY); // Akkustand im Tooltip frisch halten
             0
@@ -1327,11 +1451,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
-/// Tray-Symbole: 1 dunkle Taskleiste, 2 helle Taskleiste, 3 Mausi mit Ohren, 4 hellgrau (keine Maus, Programm).
-const SYMBOLE: [&[u8]; 4] = [
+/// Tray-Symbole: cyan (dunkle Taskleiste), schwarz (helle Taskleiste), hellgrau (keine Maus, Programm).
+const SYMBOLE: [&[u8]; 3] = [
     include_bytes!("../assets/icons/1_klar.ico"),
     include_bytes!("../assets/icons/2_schwarz.ico"),
-    include_bytes!("../assets/icons/3_mausi.ico"),
     include_bytes!("../assets/icons/4_minimal.ico"),
 ];
 
@@ -1374,20 +1497,20 @@ fn taskleiste_hell() -> bool {
 }
 
 const SYMBOL_SCHLUESSEL: &str = "tray_symbol";
-const SYMBOL_NAMEN: [&str; 5] = ["Automatisch (nach Taskleiste)", "Cyan", "Schwarz", "Mausi mit Ohren", "Hellgrau"];
+const SYMBOL_NAMEN: [&str; 4] = ["Automatisch (nach Taskleiste)", "Cyan", "Schwarz", "Hellgrau"];
+/// Gespeicherter Wert je Menüpunkt. 3 war „Mausi mit Ohren“ (entfernt) und gilt jetzt als automatisch.
+const SYMBOL_WERTE: [u32; 4] = [0, 1, 2, 4];
 
-/// 0 = automatisch, 1–4 = fest gewähltes Symbol.
+/// Menüpunkt: 0 = automatisch, 1–3 = fest gewähltes Symbol.
 fn symbol_einstellung() -> usize {
-    match zustand::lesen(SYMBOL_SCHLUESSEL) {
-        Some(n @ 1..=4) => n as usize,
-        _ => 0,
-    }
+    let v = zustand::lesen(SYMBOL_SCHLUESSEL).unwrap_or(0);
+    SYMBOL_WERTE.iter().position(|&x| x == v).unwrap_or(0)
 }
 
-/// Tray-Symbol: fest gewählt, oder automatisch: keine Maus = 4, sonst Taskleiste hell (2) oder dunkel (1).
+/// Tray-Symbol: fest gewählt, oder automatisch: keine Maus = hellgrau, sonst Taskleiste hell (schwarz) oder dunkel (cyan).
 unsafe fn symbol_waehlen(maus_da: bool) {
     let nr = match symbol_einstellung() {
-        0 if !maus_da => 3,
+        0 if !maus_da => 2,
         0 if taskleiste_hell() => 1,
         0 => 0,
         n => n - 1,
@@ -1425,7 +1548,7 @@ pub fn starten() {
         zustand::umziehen();
         pfade_nachziehen();
         let hinst = GetModuleHandleW(null());
-        ICON.set(ico_laden(SYMBOLE[3], 32)); // Programm-Icon: hellgrau
+        ICON.set(ico_laden(SYMBOLE[2], 32)); // Programm-Icon: hellgrau
         design::laden();
         klasse(&name, Some(wndproc), hinst, false);
         let name_eingabe = w(KLASSE_EINGABE);
@@ -1446,6 +1569,11 @@ pub fn starten() {
         SetTimer(hwnd, TIMER_AKKU, 15 * 60 * 1000, None);
         SetTimer(hwnd, TIMER_VOLL, 2000, None);
         SetTimer(hwnd, TIMER_SUCHE, 30 * 1000, None);
+        // MAUS_G4_MS=<ms> ändert den Takt (0 = aus), zum Messen
+        let g4_ms = std::env::var("MAUS_G4_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+        if g4_ms > 0 {
+            SetTimer(hwnd, TIMER_G400S, g4_ms, None);
+        }
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
             let e = EINGABE.get();

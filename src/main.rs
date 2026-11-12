@@ -10,6 +10,8 @@ mod design;
 mod startmenue;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod winusb;
 
 use hidpp::Maus;
 
@@ -20,6 +22,8 @@ const HILFE: &str = "maus - DPI und Abfragerate von Logitech-Mäusen
   maus geraete      alle angeschlossenen Mäuse auflisten
   maus dpi 800      DPI setzen
   maus hz 1000      Abfragerate setzen
+  maus winusb ein   G400s: WinUSB einrichten, damit sich die DPI setzen lassen (fragt nach Adminrechten)
+  maus winusb aus   G400s: WinUSB wieder entfernen
   maus hilfe        diese Hilfe";
 
 fn main() {
@@ -102,6 +106,53 @@ fn cli(a: &[String]) -> Result<(), String> {
                 println!("{}  ({:04X}:{:04X}, nicht einstellbar)", f.name, f.vid, f.pid);
             }
             println!("Suche: {} ms", t.elapsed().as_millis());
+            Ok(())
+        }
+        #[cfg(windows)]
+        "winusb" => {
+            let ein = match a.get(1).map(String::as_str) {
+                Some("ein") => true,
+                Some("aus") => false,
+                // Zur Fehlersuche: 45 s lang zeigen, was die G400s von selbst meldet (Tray vorher beenden)
+                Some("lauschen") => {
+                    let pfad = winusb::pfade().into_iter().next().ok_or("G400s über WinUSB nicht gefunden")?;
+                    let u = winusb::Usb::oeffnen(&pfad).ok_or("G400s nicht zu öffnen (läuft der Tray noch?)")?;
+                    let eps = u.endpunkte();
+                    println!("Endpunkte: {eps:02X?}");
+                    let ep = eps.iter().find(|e| e.0 & 0x80 != 0).ok_or("kein Eingangs-Endpunkt")?.0;
+                    // „treiber“: DPI-Tasten als normale Tasten melden lassen (Bit 0x80 der DPI-Stufe)
+                    let treiber = a.get(2).map(String::as_str) == Some("treiber");
+                    let mut r = [0x8Eu8, 0];
+                    u.steuern(0xA1, 0x01, 0x038E, 1, &mut r)?;
+                    println!("DPI-Register vorher: {:02X}", r[1]);
+                    if treiber {
+                        u.steuern(0x40, 0x02, 0x8E, (r[1] | 0x80) as u16, &mut [])?;
+                    }
+                    let start = std::time::Instant::now();
+                    while start.elapsed().as_secs() < 45 {
+                        let mut buf = [0u8; 64];
+                        let n = u.warten(ep, &mut buf, 1000)?;
+                        if n > 0 {
+                            println!("{:>5} ms: {:02X?}", start.elapsed().as_millis(), &buf[..n]);
+                        }
+                    }
+                    if treiber {
+                        u.steuern(0x40, 0x02, 0x8E, (r[1] & 0x7F) as u16, &mut [])?;
+                    }
+                    return Ok(());
+                }
+                _ => return Err("maus winusb ein | aus".into()),
+            };
+            if !winusb::ist_admin() {
+                winusb::als_admin(if ein { "winusb ein" } else { "winusb aus" })?;
+            } else {
+                let r = if ein { winusb::einrichten() } else { winusb::entfernen() };
+                if let Err(e) = &r {
+                    winusb::meldung_schreiben(e);
+                }
+                r?;
+            }
+            println!("G400s: WinUSB {}", if ein { "eingerichtet, DPI jetzt einstellbar" } else { "entfernt" });
             Ok(())
         }
         "liste" => {
