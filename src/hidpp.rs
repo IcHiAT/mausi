@@ -64,12 +64,35 @@ fn dpi_liste(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// Hersteller-Kennung von Logitech
+const LOGITECH: u16 = 0x046D;
+
+/// HID-Liste nur mit den Geräten dieser (Hersteller, Produkt)-Kennungen, 0 = beliebig.
+///
+/// Nie `HidApi::new()`: Das liest Name, Hersteller und Seriennummer *jedes* HID-Geräts per
+/// USB-Anfrage aus. Daran verschluckt sich z. B. der LED-Controller ASRock Polychrome
+/// (26CE:01A2) gelegentlich und die Gehäuse-LEDs blitzen weiß (gemessen am 23.11.2026).
+/// Mit Filter öffnet hidapi fremde Geräte nur ohne Zugriffsrechte und liest bloß die
+/// Kennung, die Windows ohnehin gespeichert hat; das Gerät selbst bekommt keine Anfrage.
+fn hid_nur(kennungen: &[(u16, u16)]) -> Option<HidApi> {
+    let mut api = HidApi::new_without_enumerate().ok()?;
+    for &(vid, pid) in kennungen {
+        api.add_devices(vid, pid).ok()?;
+    }
+    Some(api)
+}
+
+/// HID-Liste nur mit Logitech-Geräten (HID++-Mäuse, Empfänger und G400s)
+fn hid_logitech() -> Option<HidApi> {
+    hid_nur(&[(LOGITECH, 0)])
+}
+
 /// Alle Logitech-HID-Schnittstellen (zur Fehlersuche)
 pub fn liste() -> Result<Vec<String>, String> {
-    let api = HidApi::new().map_err(|e| format!("HID nicht verfügbar: {e}"))?;
+    let api = hid_logitech().ok_or("HID nicht verfügbar")?;
     Ok(api
         .device_list()
-        .filter(|i| i.vendor_id() == 0x046D)
+        .filter(|i| i.vendor_id() == LOGITECH)
         .map(|i| {
             format!(
                 "{:04X}:{:04X} usage {:04X}/{:04X} {}",
@@ -100,7 +123,7 @@ pub struct Platz {
 const G400S: u8 = 0;
 
 fn hidpp_schnittstelle(i: &hidapi::DeviceInfo) -> bool {
-    i.vendor_id() == 0x046D && i.usage_page() == 0xFF00 && i.usage() == 0x0002
+    i.vendor_id() == LOGITECH && i.usage_page() == 0xFF00 && i.usage() == 0x0002
 }
 
 /// Alle Plätze abfragen, an denen eine einstellbare Maus antwortet. Dauert 2–4 s (schlafende Funkmaus),
@@ -112,7 +135,7 @@ pub fn suchen() -> Vec<Platz> {
 /// Wie `suchen`, dazu: gab es einen Empfänger oder Anschluss, an dem keine Maus geantwortet hat?
 /// (z. B. Funkmaus schläft tief oder ist aus) – dann lohnt es sich, später noch einmal zu suchen.
 pub fn suchen_mit_luecke() -> (Vec<Platz>, bool) {
-    let Ok(api) = HidApi::new() else { return (Vec::new(), false) };
+    let Some(api) = hid_logitech() else { return (Vec::new(), false) };
     let api = Rc::new(api);
     let infos: Vec<_> = api.device_list().filter(|i| hidpp_schnittstelle(i)).cloned().collect();
     let mut gefunden: Vec<Platz> = Vec::new();
@@ -142,7 +165,7 @@ pub fn suchen_mit_luecke() -> (Vec<Platz>, bool) {
 
 /// Mit den gefundenen Plätzen verbinden.
 pub fn verbinden(plaetze: &[Platz]) -> Vec<Maus> {
-    let Ok(api) = HidApi::new() else { return Vec::new() };
+    let Some(api) = hid_logitech() else { return Vec::new() };
     let api = Rc::new(api);
     let mut v = Vec::new();
     for p in plaetze {
@@ -160,8 +183,9 @@ pub fn verbinden(plaetze: &[Platz]) -> Vec<Maus> {
 }
 
 /// Mäuse, die Mausi nicht einstellen kann: Maus-Schnittstellen von Geräten ohne HID++.
+/// Nur die Geräte, die Windows als Maus führt, werden ausgelesen (siehe `hid_nur`).
 pub fn fremde() -> Vec<Fremd> {
-    let Ok(api) = HidApi::new() else { return Vec::new() };
+    let Some(api) = hid_nur(&maus_kennungen()) else { return Vec::new() };
     let hidpp_ids: Vec<(u16, u16)> =
         api.device_list().filter(|i| hidpp_schnittstelle(i)).map(|i| (i.vendor_id(), i.product_id())).collect();
     let mut fremde: Vec<Fremd> = Vec::new();
@@ -181,6 +205,57 @@ pub fn fremde() -> Vec<Fremd> {
         fremde.push(Fremd { name: name.to_string(), vid: id.0, pid: id.1 });
     }
     fremde
+}
+
+/// (Hersteller, Produkt) aller Geräte, die Windows als Maus führt (Raw Input). Die Liste kommt
+/// aus dem Speicher von Windows, die Geräte selbst werden dabei nicht angefragt.
+#[cfg(windows)]
+fn maus_kennungen() -> Vec<(u16, u16)> {
+    use windows_sys::Win32::UI::Input::{
+        GetRawInputDeviceInfoW, GetRawInputDeviceList, RAWINPUTDEVICELIST, RIDI_DEVICENAME, RIM_TYPEMOUSE,
+    };
+    let groesse = std::mem::size_of::<RAWINPUTDEVICELIST>() as u32;
+    let mut anzahl = 0u32;
+    let mut v: Vec<(u16, u16)> = Vec::new();
+    unsafe {
+        if GetRawInputDeviceList(std::ptr::null_mut(), &mut anzahl, groesse) == u32::MAX {
+            return v;
+        }
+        let mut liste: Vec<RAWINPUTDEVICELIST> = vec![std::mem::zeroed(); anzahl as usize + 4];
+        let mut platz = liste.len() as u32;
+        let n = GetRawInputDeviceList(liste.as_mut_ptr(), &mut platz, groesse);
+        if n == u32::MAX {
+            return v;
+        }
+        for d in &liste[..n as usize] {
+            if d.dwType != RIM_TYPEMOUSE {
+                continue;
+            }
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            let r = GetRawInputDeviceInfoW(d.hDevice, RIDI_DEVICENAME, buf.as_mut_ptr().cast(), &mut len);
+            if r == u32::MAX || r == 0 {
+                continue;
+            }
+            let name = String::from_utf16_lossy(&buf[..r as usize]).to_uppercase();
+            let hex = |marke: &str| {
+                let i = name.find(marke)? + marke.len();
+                u16::from_str_radix(name.get(i..i + 4)?, 16).ok()
+            };
+            if let (Some(vid), Some(pid)) = (hex("VID_"), hex("PID_")) {
+                if !v.contains(&(vid, pid)) {
+                    v.push((vid, pid));
+                }
+            }
+        }
+    }
+    v
+}
+
+/// Ohne Raw Input: alle Geräte (unter Linux ist das ein reines Lesen aus sysfs)
+#[cfg(not(windows))]
+fn maus_kennungen() -> Vec<(u16, u16)> {
+    vec![(0, 0)]
 }
 
 /// Alle Mäuse: die einstellbaren (HID++ 2.0 und G400s) und die übrigen.
@@ -251,6 +326,12 @@ impl Maus {
     /// Zugang zur G400s (nur bei der G400s aufgerufen)
     fn g4(&self) -> &g400s::Zugang {
         self.g4.as_ref().expect("G400s-Zugang")
+    }
+
+    /// G400s: steckt sie noch und antwortet über den offenen Zugang?
+    /// (Die Suche kann sie über WinUSB nicht ein zweites Mal öffnen, solange der Tray sie hält.)
+    pub fn g400s_noch_da(&self) -> bool {
+        self.idx == G400S && self.g4().da()
     }
 
     /// Gleiche Maus? (gleiche Schnittstelle, gleicher Platz)

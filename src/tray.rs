@@ -168,6 +168,8 @@ thread_local! {
     static MENU_OFFEN: Cell<bool> = Cell::new(false);
     /// Hz-Messung eingeschaltet: gilt nur, solange das Menü offen ist
     static MESSEN: Cell<bool> = Cell::new(false);
+    /// Prozess des Spiels, für das die Einblendung beim Start schon kam (0 = keins)
+    static SPIEL_GEZEIGT: Cell<u32> = Cell::new(0);
 }
 
 /// Ergebnis der Suche aus dem Hintergrund-Thread
@@ -204,6 +206,10 @@ fn suche_uebernehmen() {
                 None => zu_verbinden.push(p),
             }
         }
+        // WinUSB lässt nur einen Zugriff zu: Die Suche findet die G400s nicht, solange Mausi sie
+        // offen hält. Sie bleibt, solange sie über den eigenen Zugang antwortet. Vorher fiel sie
+        // bei jeder Suche heraus, kam bei der nächsten neu dazu (Einblendung fehlte, kam dann grundlos).
+        neu.extend(alt.into_iter().filter(|g| g.maus.g400s_noch_da()));
         neu.extend(hidpp::verbinden(&zu_verbinden).into_iter().map(Geraet::neu));
         neu.truncate(MAX_GERAETE);
         a.geraete = neu;
@@ -550,25 +556,30 @@ fn spiele_laden() -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Wechselt eine Maus zwischen Desktop- und Vollbild-Werten. true = gewechselt.
+/// Wechselt eine Maus zwischen Desktop- und Vollbild-Werten. None = nicht gewechselt,
+/// Some(true) = gewechselt und DPI oder Hz haben sich wirklich geändert.
 /// Schlägt das Setzen fehl (Maus schläft), bleibt der Zustand und der nächste Takt versucht es erneut.
-fn geraet_wechseln(g: &mut Geraet, an: bool) -> bool {
+fn geraet_wechseln(g: &mut Geraet, an: bool) -> Option<bool> {
     if g.im_spiel == an {
-        return false;
+        return None;
     }
     let (sd, sh, dd, dh, hz_g) = (g.spiel_dpi, g.spiel_hz, g.desk_dpi, g.desk_hz, g.hz_gesetzt);
     if an && sd.is_none() && sh.is_none() {
         g.im_spiel = true; // nichts umzustellen
-        return true;
+        return Some(false);
     }
     let m = &g.maus;
+    let geaendert;
+    let neue_dpi;
     if an {
         let akt = if sd.is_some() { m.dpi().ok() } else { None };
         let ok_d = sd.map_or(true, |v| akt == Some(v) || m.set_dpi(v).is_ok());
         let ok_h = sh.map_or(true, |v| hz_g == Some(v) || m.set_hz(v).is_ok());
         if !(ok_d && ok_h) {
-            return false;
+            return None;
         }
+        geaendert = (sd.is_some() && akt != sd) || (sh.is_some() && hz_g != sh);
+        neue_dpi = sd;
         g.desk_dpi = akt;
         g.desk_hz = hz_g;
         if sh.is_some() {
@@ -578,23 +589,29 @@ fn geraet_wechseln(g: &mut Geraet, an: bool) -> bool {
         let ok_d = sd.is_none() || dd.map_or(true, |v| m.set_dpi(v).is_ok());
         let ok_h = sh.is_none() || dh.map_or(true, |v| m.set_hz(v).is_ok());
         if !(ok_d && ok_h) {
-            return false;
+            return None;
         }
+        geaendert = (sd.is_some() && dd.is_some() && dd != sd) || (sh.is_some() && dh.is_some() && dh != sh);
+        neue_dpi = if sd.is_some() { dd } else { None };
         if sh.is_some() {
             g.hz_gesetzt = dh;
         }
     }
+    // Gemerkten Stand nachziehen, sonst meldet die G400s-Abfrage den Wechsel ein zweites Mal
+    if let (Some(d), Some(s)) = (neue_dpi, g.stand.as_mut()) {
+        dpi_eintragen(s, d);
+    }
     g.im_spiel = an;
-    true
+    Some(geaendert)
 }
 
-/// Alle Mäuse umstellen. Ergebnis: Nummern der Mäuse, die gewechselt haben und eigene Vollbild-Werte haben.
+/// Alle Mäuse umstellen. Ergebnis: Nummern der Mäuse, deren DPI oder Hz sich dabei wirklich geändert haben.
 fn spiel_wechseln(an: bool) -> Vec<usize> {
     APP.with(|c| {
         let mut a = c.borrow_mut();
         let mut v = Vec::new();
         for (k, g) in a.geraete.iter_mut().enumerate() {
-            if geraet_wechseln(g, an) && (g.spiel_dpi.is_some() || g.spiel_hz.is_some()) {
+            if geraet_wechseln(g, an) == Some(true) {
                 v.push(k);
             }
         }
@@ -1415,7 +1432,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_TIMER if wp == TIMER_VOLL => {
             let an = vollbild_erkannt();
             let gewechselt = spiel_wechseln(an);
-            if let Some(&k) = gewechselt.first() {
+            // Beim Betreten nur einmal pro Spiel einblenden: Alt-Tab oder ein Overlay, das kurz
+            // den Fokus nimmt, soll nicht jedes Mal das Feld zeigen
+            let mut zeigen = true;
+            if an && !gewechselt.is_empty() {
+                let mut pid = 0;
+                GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+                zeigen = SPIEL_GEZEIGT.replace(pid) != pid;
+            }
+            if let (Some(&k), true) = (gewechselt.first(), zeigen) {
                 let liste = tip_aktualisieren(hwnd, NIM_MODIFY);
                 einblenden(liste.get(k).and_then(|e| e.stand.as_ref()));
             }

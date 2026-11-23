@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.8 (23.11.2026)
+
+- Behoben: RGB-Beleuchtung anderer Geräte blitzte gelegentlich auf, z. B. die Gehäuselüfter am ASRock-Polychrome-Controller, die kurz weiß wurden. Bei jeder Suche nach Mäusen (alle 30 s, solange ein Empfänger ohne Maus steckt, und bei jedem An- oder Abstecken) las Mausi Name und Seriennummer *aller* HID-Geräte aus. Daran verschluckt sich so ein Controller ab und zu. Jetzt liest Mausi nur noch Logitech-Geräte und die Geräte aus, die Windows als Maus führt. Gemessen: alte Version 9 Blitze bei 106 Abfragen, neue Version 0 bei rund 240.
+
+## 0.2.7 (12.11.2026)
+
+- Behoben: Im Spiel kam beim Umschalten der DPI-Stufe an der G400s oft keine Einblendung, dafür kam sie manchmal einfach so. Die Suche nach Mäusen (alle 30 s, solange ein Empfänger ohne Maus steckt) konnte die G400s nicht öffnen, weil WinUSB nur einen Zugriff zulässt und Mausi sie schon offen hält. Dadurch fiel die G400s jedes Mal aus der Liste und kam bei der nächsten Suche neu dazu. Jetzt bleibt sie, solange sie antwortet.
+- Geändert: Beim Wechsel zwischen Desktop und Spiel kommt die Einblendung nur noch, wenn sich DPI oder Hz dabei wirklich ändern. Beim Betreten kommt sie nur einmal pro Spiel, nicht bei jedem Alt-Tab oder Overlay, das kurz den Fokus nimmt.
+
 ## 0.2.6 (12.11.2026)
 
 - Behoben: Die Einblendung beim Umschalten der DPI-Stufe an der G400s kam oft verspätet oder gar nicht. Mausi fragte vorher alle Mäuse neu ab, eine schlafende Funkmaus hielt das sekundenlang auf. Jetzt blendet Mausi sofort ein.
