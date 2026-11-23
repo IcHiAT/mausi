@@ -29,10 +29,10 @@ const ID_NEU: usize = 4;
 const ID_ENDE: usize = 9;
 const ID_DESIGN: usize = 11;
 const ID_STARTMENUE: usize = 12;
-/// Hz-Messung im Hauptmenü (oben), per Klick an und aus
+/// Hz-Messung (unter Einstellungen), per Klick an und aus; das Menü bleibt dabei offen
 const ID_MESSEN: usize = 13;
-/// Einträge im Hauptmenü vor den Mäusen: Messzeile und Trennstrich
-const VOR_MAEUSEN: u32 = 2;
+/// Design hell (ID_DESIGN = dunkel)
+const ID_HELL: usize = 14;
 const ID_SYMBOL: usize = 5000;
 // Menüpunkte je Maus: GERAET * (Nummer + 1) + lokale ID
 const GERAET: usize = 10000;
@@ -47,6 +47,8 @@ const ID_VHZ_AUS: usize = 10;
 const ID_DPI_INFO: usize = 9;
 /// G400s: WinUSB einrichten, damit sich die DPI setzen lassen
 const ID_WINUSB: usize = 11;
+/// Zweite Kopfzeile der Maus („800 DPI - 500 Hz“), grau; die ID dient nur zum Wiederfinden
+const ID_KOPF: usize = 12;
 const MAX_GERAETE: usize = 8;
 const ID_EDIT: usize = 101;
 const TIMER_LIVE: usize = 1;
@@ -342,15 +344,19 @@ fn mit_maus(k: usize, f: impl FnOnce(&Maus) -> Result<(), String>) -> Result<Str
     })
 }
 
+/// Erste Kopfzeile der Maus im Menü: „Name - Akku 81 %“.
+fn kopf_name(s: &Stand) -> String {
+    match s.akku {
+        Some((p, true)) => format!("{} - Akku {p} % (lädt)", s.name),
+        Some((p, false)) => format!("{} - Akku {p} %", s.name),
+        None => s.name.clone(),
+    }
+}
+
+/// Zweite Kopfzeile: „800 DPI - 500 Hz“.
 fn kopf(s: &Stand) -> String {
-    let d = s.dpi.map(|d| format!("{d} DPI")).unwrap_or_default();
-    let h = s.hz.map(|h| format!("{h} Hz")).unwrap_or_default();
-    let a = match s.akku {
-        Some((p, true)) => format!(" · Akku {p} % (lädt)"),
-        Some((p, false)) => format!(" · Akku {p} %"),
-        None => String::new(),
-    };
-    format!("{} - {d} · {h}{a}", s.name)
+    let teile: Vec<String> = [s.dpi.map(|d| format!("{d} DPI")), s.hz.map(|h| format!("{h} Hz"))].into_iter().flatten().collect();
+    teile.join(" - ")
 }
 
 unsafe fn tray(hwnd: HWND, aktion: u32, tip: &str) {
@@ -395,7 +401,7 @@ unsafe fn tip_zeigen(hwnd: HWND, aktion: u32) -> Vec<Eintrag> {
         zeilen.join("\n")
     };
     // Erste Zeile: Programmname und Version (Tooltip ist auf 127 Zeichen begrenzt, Version bleibt vorn)
-    let tip = format!("Mausi {}\n{}", env!("CARGO_PKG_VERSION"), inhalt);
+    let tip = format!("Mausi v{}\n{}", env!("CARGO_PKG_VERSION"), inhalt);
     symbol_waehlen(liste.iter().any(|e| e.stand.is_some()));
     tray(hwnd, aktion, &tip);
     for e in &liste {
@@ -449,9 +455,29 @@ unsafe fn g400s_nachsehen(hwnd: HWND) {
 }
 
 /// DPI/Hz am rechten Bildschirmrand einblenden.
+/// Vollbild-Werte einer Maus einblenden, z. B. nach einer Änderung im Menü; „Wie Desktop“ zeigt die Desktop-Werte.
+unsafe fn vollbild_einblenden(k: usize) {
+    let werte = APP.with(|c| {
+        let a = c.borrow();
+        let g = a.geraete.get(k)?;
+        let s = g.stand.as_ref()?;
+        let (dd, dh) = if g.im_spiel { (g.desk_dpi, g.desk_hz) } else { (s.dpi, g.hz_gesetzt.or(s.hz)) };
+        Some((s.name.clone(), g.spiel_dpi.or(dd), g.spiel_hz.or(dh)))
+    });
+    if let Some((name, d, h)) = werte {
+        design::osd_zeigen(&name, d, h, "Vollbild", im_spiel());
+    }
+}
+
+/// Menüpunkt gehört zu den Vollbild-Werten einer Maus
+fn ist_vollbild(cmd: usize) -> bool {
+    cmd >= GERAET && matches!(cmd % GERAET, ID_VDPI_AUS | ID_VHZ_AUS | ID_VDPI..=4999)
+}
+
 unsafe fn einblenden(st: Option<&Stand>) {
     if let Some(s) = st {
-        design::osd_zeigen(s.dpi, s.hz, im_spiel());
+        let spiel = im_spiel();
+        design::osd_zeigen(&s.name, s.dpi, s.hz, if spiel { "Vollbild" } else { "Desktop" }, spiel);
     }
 }
 
@@ -743,8 +769,31 @@ unsafe fn melden(hwnd: HWND, text: &str) {
 
 // ---------- Live-Messung ----------
 
-const LIVE_LEER: &str = "Gemessen: Maus bewegen …";
+const LIVE_LEER: &str = "Hz: Maus bewegen …";
 const MESSEN_AUS: &str = "Hz messen";
+
+/// Hz-Messung im offenen Menü an- oder ausschalten (Klick auf „Hz messen“ unter Einstellungen).
+unsafe fn messen_umschalten(menu: HMENU, pos: u32) {
+    let an = !MESSEN.get();
+    MESSEN.set(an);
+    let hwnd = HAUPT.get();
+    let rid = if an {
+        RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_INPUTSINK, hwndTarget: hwnd }
+    } else {
+        RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: RIDEV_REMOVE, hwndTarget: null_mut() }
+    };
+    RegisterRawInputDevices(&rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+    LIVE.with(|l| {
+        if let Some(l) = l.borrow_mut().as_mut() {
+            l.messen = an;
+            l.messungen.clear();
+            l.text = LIVE_LEER.to_string();
+        }
+    });
+    eintrag_text(menu, pos, if an { LIVE_LEER } else { MESSEN_AUS });
+    CheckMenuItem(menu, pos, MF_BYPOSITION | if an { MF_CHECKED } else { MF_UNCHECKED });
+    eintrag_malen(menu, pos);
+}
 
 unsafe fn live_starten(hwnd: HWND, menu: HMENU, messen: bool, namen: Vec<(u32, String)>, dpi: Vec<LiveDpi>) {
     if messen {
@@ -894,8 +943,8 @@ unsafe fn live_takt() {
             let t = match beste {
                 None => LIVE_LEER.to_string(),
                 Some((hz, k)) => match l.namen.iter().find(|(kk, _)| *kk == k) {
-                    Some((_, n)) => format!("Gemessen: {} Hz – {n}", rate_runden(hz)),
-                    None => format!("Gemessen: {} Hz", rate_runden(hz)),
+                    Some((_, n)) => format!("{} Hz – {n}", rate_runden(hz)),
+                    None => format!("{} Hz gemessen", rate_runden(hz)),
                 },
             };
             if t != l.text {
@@ -941,11 +990,11 @@ unsafe fn live_takt() {
                 }
             }
         });
-        // Kopfzeile bzw. Untermenü-Titel der Maus steht im Hauptmenü nach Messzeile und Trennstrich
-        let pos = VOR_MAEUSEN + lg.k as u32;
-        eintrag_text(menu, pos, &kopf_text);
-        eintrag_malen(menu, pos);
         let basis = GERAET * (lg.k + 1);
+        if let Some((m, pos)) = eintrag_finden(menu, (basis + ID_KOPF) as u32) {
+            eintrag_text(m, pos, &kopf_text);
+            eintrag_malen(m, pos);
+        }
         if fest {
             if let Some((m, pos)) = eintrag_finden(menu, (basis + ID_DPI_INFO) as u32) {
                 eintrag_text(m, pos, &dpi_info(Some(d)));
@@ -1049,7 +1098,9 @@ unsafe fn eingabe_ok(hwnd: HWND) {
         Ok(()) => {
             DestroyWindow(hwnd);
             let liste = tip_aktualisieren(HAUPT.get(), NIM_MODIFY);
-            if !spiel {
+            if spiel {
+                vollbild_einblenden(k);
+            } else {
                 einblenden(liste.get(k).and_then(|e| e.stand.as_ref()));
             }
         }
@@ -1173,9 +1224,325 @@ unsafe fn geraet_einfuegen(ziel: HMENU, k: usize, s: &Stand) -> Angebot {
         }
         AppendMenuW(voll, MF_POPUP, sub as usize, w("Hz").as_ptr());
     }
-    let titel = if im { "Vollbild (Spiel) – gerade aktiv" } else { "Vollbild (Spiel)" };
+    let titel = if im { "Vollbild – gerade aktiv" } else { "Vollbild" };
     AppendMenuW(ziel, MF_POPUP, voll as usize, w(titel).as_ptr());
     Angebot { dpi: s.dpi_liste.clone(), raten: s.raten.clone(), vdpi }
+}
+
+thread_local! {
+    /// Angebote des offenen Menüs, für Klicks, nach denen das Menü offen bleibt
+    static OFFEN_ANGEBOT: RefCell<Vec<Angebot>> = RefCell::new(Vec::new());
+    /// Fehler eines solchen Klicks: Menü wird geschlossen und der Fehler danach gemeldet
+    static OFFEN_FEHLER: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// Punkte, nach denen das Menü offen bleibt: DPI, Hz, Vollbild-Werte, Tray-Symbol und die Haken
+/// „Mit Windows starten“ und „Im Startmenü anzeigen“. None = kein solcher Punkt.
+/// Ok(Some(k)) = DPI oder Hz von Maus k haben sich geändert.
+unsafe fn wert_setzen(cmd: usize, angebote: &[Angebot]) -> Option<Result<Option<usize>, String>> {
+    let r = match cmd {
+        ID_AUTO => {
+            autostart_setzen(!autostart_an());
+            Ok(None)
+        }
+        ID_STARTMENUE => {
+            startmenue::setzen("Mausi", !startmenue::vorhanden("Mausi"));
+            Ok(None)
+        }
+        c if (ID_SYMBOL..ID_SYMBOL + SYMBOL_NAMEN.len()).contains(&c) => {
+            let nr = c - ID_SYMBOL;
+            zustand::merken(SYMBOL_SCHLUESSEL, (nr != 0).then_some(SYMBOL_WERTE[nr]));
+            symbol_waehlen(uebersicht().iter().any(|e| e.stand.is_some()));
+            Ok(None)
+        }
+        c if (GERAET..GERAET * (MAX_GERAETE + 1)).contains(&c) => {
+            let k = c / GERAET - 1;
+            let an = angebote.get(k)?;
+            let stand = |f: &dyn Fn(&mut Stand)| {
+                APP.with(|c| {
+                    if let Some(s) = c.borrow_mut().geraete.get_mut(k).and_then(|g| g.stand.as_mut()) {
+                        f(s);
+                    }
+                })
+            };
+            match c % GERAET {
+                ID_VDPI_AUS => {
+                    spiel_merken(k, Some(None), None);
+                    Ok(Some(k))
+                }
+                ID_VHZ_AUS => {
+                    spiel_merken(k, None, Some(None));
+                    Ok(Some(k))
+                }
+                l if (ID_VDPI..ID_VDPI + an.vdpi.len()).contains(&l) => {
+                    spiel_merken(k, Some(Some(an.vdpi[l - ID_VDPI])), None);
+                    Ok(Some(k))
+                }
+                l if (ID_VHZ..ID_VHZ + an.raten.len()).contains(&l) => {
+                    spiel_merken(k, None, Some(Some(an.raten[l - ID_VHZ])));
+                    Ok(Some(k))
+                }
+                l if (ID_DPI..ID_DPI + an.dpi.len()).contains(&l) => {
+                    let v = an.dpi[l - ID_DPI];
+                    mit_maus(k, |m| m.set_dpi(v)).map(|_| {
+                        stand(&|s| dpi_eintragen(s, v));
+                        Some(k)
+                    })
+                }
+                l if (ID_HZ..ID_HZ + an.raten.len()).contains(&l) => {
+                    let v = an.raten[l - ID_HZ];
+                    mit_maus(k, |m| m.set_hz(v)).map(|name| {
+                        zustand::hz_merken(&name, v);
+                        APP.with(|c| {
+                            if let Some(g) = c.borrow_mut().geraete.get_mut(k) {
+                                g.hz_gesetzt = Some(v);
+                            }
+                        });
+                        stand(&|s| s.hz = Some(v));
+                        Some(k)
+                    })
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(r)
+}
+
+/// Nachrichtenfilter der Menüschleife: Ein Mausklick auf einen Schalter oder Vollbild-Wert (siehe `ohne_maus`) wird hier ausgeführt und
+/// verschluckt, damit das Menü offen bleibt. Tastatur (Enter) schließt das Menü wie bisher.
+unsafe extern "system" fn menu_filter(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if code == MSGF_MENU as i32 {
+        let m = &*(lp as *const MSG);
+        if m.message == WM_LBUTTONUP && menu_klick(m.pt) {
+            return 1;
+        }
+    }
+    CallNextHookEx(null_mut(), code, wp, lp)
+}
+
+/// Menüpunkt, der nichts an die Maus schickt und deshalb im offenen Menü laufen darf.
+///
+/// Nie DPI oder Hz bei offenem Menü setzen: Die Menüschleife hält Maus und Tastatur des
+/// ganzen Systems fest. Wartet Mausi dort auf die Maus (z. B. meldet sie sich nach einem
+/// Hz-Wechsel neu an), sind Maus und Tastatur tot, bis der PC aus ist (23.11.2026, 0.2.9-Test).
+/// Vollbild-Werte werden nur gemerkt; läuft gerade ein Spiel, stellt `spiel_merken` die Maus um.
+fn ohne_maus(cmd: usize) -> bool {
+    match cmd {
+        ID_AUTO | ID_STARTMENUE => true,
+        c if (ID_SYMBOL..ID_SYMBOL + SYMBOL_NAMEN.len()).contains(&c) => true,
+        c if ist_vollbild(c) => {
+            let k = c / GERAET - 1;
+            APP.with(|a| a.borrow().geraete.get(k).is_some_and(|g| !g.im_spiel))
+        }
+        _ => false,
+    }
+}
+
+unsafe fn menu_klick(pt: POINT) -> bool {
+    let f = WindowFromPoint(pt);
+    if f.is_null() {
+        return false;
+    }
+    let mut buf = [0u16; 16];
+    let n = GetClassNameW(f, buf.as_mut_ptr(), buf.len() as i32) as usize;
+    if String::from_utf16_lossy(&buf[..n]) != "#32768" {
+        return false;
+    }
+    let menu = SendMessageW(f, MN_GETHMENU, 0, 0) as HMENU;
+    if menu.is_null() {
+        return false;
+    }
+    let pos = MenuItemFromPoint(f, menu, pt);
+    if pos < 0 || GetMenuState(menu, pos as u32, MF_BYPOSITION) & MF_GRAYED != 0 {
+        return false;
+    }
+    let id = GetMenuItemID(menu, pos);
+    if id == 0 || id == u32::MAX {
+        return false;
+    }
+    let cmd = id as usize;
+    if cmd == ID_MESSEN {
+        messen_umschalten(menu, pos as u32);
+        return true;
+    }
+    // Was mit der Maus reden muss, schließt das Menü wie gewohnt und läuft erst danach
+    if !ohne_maus(cmd) {
+        return false;
+    }
+    let Some(r) = OFFEN_ANGEBOT.with(|a| wert_setzen(cmd, &a.borrow())) else { return false };
+    match r {
+        Err(e) => {
+            OFFEN_FEHLER.with(|f| *f.borrow_mut() = Some(e));
+            EndMenu();
+        }
+        Ok(geaendert) => {
+            haken_setzen(menu, pos as u32, cmd);
+            match geaendert {
+                Some(k) if ist_vollbild(cmd) => vollbild_einblenden(k),
+                Some(k) => kopf_nachziehen(k),
+                None => {}
+            }
+            tip_zeigen(HAUPT.get(), NIM_MODIFY);
+        }
+    }
+    true
+}
+
+/// Haken im offenen Menü nachziehen: Schalter umdrehen, sonst im Untermenü nur den gewählten Wert haken.
+unsafe fn haken_setzen(menu: HMENU, pos: u32, cmd: usize) {
+    if cmd == ID_AUTO || cmd == ID_STARTMENUE {
+        let an = GetMenuState(menu, pos, MF_BYPOSITION) & MF_CHECKED != 0;
+        CheckMenuItem(menu, pos, MF_BYPOSITION | if an { MF_UNCHECKED } else { MF_CHECKED });
+        eintrag_malen(menu, pos);
+        return;
+    }
+    for p in 0..GetMenuItemCount(menu).max(0) as u32 {
+        let id = GetMenuItemID(menu, p as i32);
+        if id == 0 || id == u32::MAX {
+            continue;
+        }
+        let id = id as usize;
+        if id >= GERAET && matches!(id % GERAET, ID_DPI_EIGEN | ID_VDPI_EIGEN) {
+            continue;
+        }
+        CheckMenuItem(menu, p, MF_BYPOSITION | if p == pos { MF_CHECKED } else { MF_UNCHECKED });
+        eintrag_malen(menu, p);
+    }
+}
+
+/// Nach DPI- oder Hz-Wechsel: Kopfzeile der Maus im offenen Menü neu schreiben und einblenden.
+unsafe fn kopf_nachziehen(k: usize) {
+    let Some(s) = APP.with(|c| c.borrow().geraete.get(k).and_then(|g| g.stand.clone())) else { return };
+    let menu = LIVE.with(|l| {
+        let mut l = l.borrow_mut();
+        let l = l.as_mut()?;
+        if let Some(x) = l.dpi.iter_mut().find(|x| x.k == k) {
+            x.dpi = s.dpi;
+        }
+        Some(l.menu)
+    });
+    if let Some((m, pos)) = menu.and_then(|menu| eintrag_finden(menu, (GERAET * (k + 1) + ID_KOPF) as u32)) {
+        eintrag_text(m, pos, &kopf(&s));
+        eintrag_malen(m, pos);
+    }
+    einblenden(Some(&s));
+}
+
+/// Menüposition außerhalb der Taskleiste: Liegt der Klickpunkt in der Taskleiste, wird er an den
+/// Rand des Arbeitsbereichs geschoben und das Menü von dort weg ausgerichtet.
+unsafe fn menu_platz(p: POINT) -> (POINT, u32) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
+        return (p, 0);
+    }
+    let a = mi.rcWork;
+    let mut q = POINT { x: p.x.clamp(a.left, a.right - 1), y: p.y.clamp(a.top, a.bottom - 1) };
+    // Immer nach oben aufgehen, waagerecht zur Bildschirmmitte hin
+    let mut f = TPM_BOTTOMALIGN;
+    if p.y < a.top {
+        // Taskleiste oben: nach oben ist kein Platz
+        q.y = a.top;
+        f = TPM_TOPALIGN;
+    }
+    let rechts = q.x > (a.left + a.right) / 2;
+    design::pfeil_links_setzen(rechts);
+    f |= if rechts { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
+    (q, f)
+}
+
+/// Fängt das Platzieren der Untermenüs ab: Sie gehen nach oben auf (Unterkante auf Höhe des
+/// Eintrags, der sie öffnet) und zur Bildschirmmitte hin. Windows legt sie sonst nach unten an.
+unsafe extern "system" fn menu_lage(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // Der Hook selbst darf die Nachricht nicht ändern (Windows verwirft Änderungen am WINDOWPOS).
+    // Darum wird jedes neue Menüfenster beim Anlegen umgeleitet; `menu_fenster_proc` legt es dann.
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWLP_WNDPROC, WM_CREATE};
+    if code >= 0 {
+        let c = &*(lp as *const CWPSTRUCT);
+        if c.message == WM_CREATE && ist_menue_fenster(c.hwnd) {
+            let neu = menu_fenster_proc as WndProc as isize;
+            let alt = SetWindowLongPtrW(c.hwnd, GWLP_WNDPROC, neu);
+            if alt != 0 && alt != neu {
+                MENU_PROC_ALT.store(alt, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    CallNextHookEx(null_mut(), code, wp, lp)
+}
+
+/// Fensterprozedur der Systemklasse „#32768“ vor der Umleitung (für alle Menüfenster dieselbe).
+static MENU_PROC_ALT: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+unsafe extern "system" fn menu_fenster_proc(f: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CallWindowProcW, DefWindowProcW};
+    if msg == WM_WINDOWPOSCHANGING {
+        untermenue_legen(f, &mut *(lp as *mut WINDOWPOS));
+    }
+    match MENU_PROC_ALT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => DefWindowProcW(f, msg, wp, lp),
+        alt => CallWindowProcW(Some(std::mem::transmute::<isize, WndProc>(alt)), f, msg, wp, lp),
+    }
+}
+
+type WndProc = unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+
+unsafe fn ist_menue_fenster(f: HWND) -> bool {
+    let mut buf = [0u16; 16];
+    let n = GetClassNameW(f, buf.as_mut_ptr(), buf.len() as i32) as usize;
+    String::from_utf16_lossy(&buf[..n]) == "#32768"
+}
+
+unsafe fn untermenue_legen(fenster: HWND, wp: &mut WINDOWPOS) {
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+    // Nur beim Aufgehen; ein schon sichtbares Menü (z. B. das Hauptmenü) bleibt, wo es ist
+    if wp.flags & SWP_NOMOVE != 0 || IsWindowVisible(fenster) != 0 {
+        return;
+    }
+    // Der Eintrag, der das Untermenü öffnet, liegt unter dem Mauszeiger im übergeordneten Menü.
+    // Beim Hauptmenü liegt der Zeiger auf der Taskleiste: dann bleibt alles, wie TrackPopupMenu es will.
+    let mut pt = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut pt);
+    let eltern = WindowFromPoint(pt);
+    if eltern.is_null() || eltern == fenster || !ist_menue_fenster(eltern) {
+        return;
+    }
+    let menu = SendMessageW(eltern, MN_GETHMENU, 0, 0) as HMENU;
+    if menu.is_null() {
+        return;
+    }
+    let pos = MenuItemFromPoint(eltern, menu, pt);
+    let mut eintrag: RECT = std::mem::zeroed();
+    let mut rahmen: RECT = std::mem::zeroed();
+    if pos < 0 || GetMenuItemRect(null_mut(), menu, pos as u32, &mut eintrag) == 0 || GetWindowRect(eltern, &mut rahmen) == 0 {
+        return;
+    }
+    let (b, h) = if wp.flags & SWP_NOSIZE == 0 {
+        (wp.cx, wp.cy)
+    } else {
+        let mut r: RECT = std::mem::zeroed();
+        GetWindowRect(fenster, &mut r);
+        (r.right - r.left, r.bottom - r.top)
+    };
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mut mi) == 0 {
+        return;
+    }
+    let a = mi.rcWork;
+    // Waagerecht zur Mitte; passt es dort nicht hin, auf die andere Seite
+    let links = rahmen.left - b;
+    let rechts = rahmen.right;
+    let zur_mitte_links = (rahmen.left + rahmen.right) / 2 > (a.left + a.right) / 2;
+    wp.x = match (zur_mitte_links, links >= a.left, rechts + b <= a.right) {
+        (true, true, _) | (false, true, false) => links,
+        _ => rechts.min(a.right - b),
+    };
+    // Nach oben: Unterkante bündig mit dem Eintrag (plus Rand des Untermenüs)
+    let rand = 3;
+    wp.y = (eintrag.bottom + rand - h).clamp(a.top, (a.bottom - h).max(a.top));
 }
 
 unsafe fn menu_zeigen(hwnd: HWND) {
@@ -1184,8 +1551,8 @@ unsafe fn menu_zeigen(hwnd: HWND) {
     if MENU_OFFEN.replace(true) {
         return;
     }
-    // Klick auf „Hz messen“ öffnet das Menü an derselben Stelle neu, mit Messung an bzw. aus.
-    // Beim nächsten Öffnen ist sie wieder aus.
+    // Ein Mausklick auf „Hz messen“ schaltet im offenen Menü um (`messen_umschalten`); per Tastatur
+    // gewählt, öffnet sich das Menü an derselben Stelle neu. Beim nächsten Öffnen ist sie wieder aus.
     let mut p = POINT { x: 0, y: 0 };
     GetCursorPos(&mut p);
     while menu_zeigen_innen(hwnd, p) {}
@@ -1204,23 +1571,25 @@ unsafe fn menu_zeigen_innen(hwnd: HWND, p: POINT) -> bool {
     namen.extend(liste.iter().map(|e| (e.kennung, e.name.clone())));
     let menu = CreatePopupMenu();
     let messen = MESSEN.get();
-    let (t, f) = if messen { (LIVE_LEER, MF_CHECKED) } else { (MESSEN_AUS, 0) };
-    AppendMenuW(menu, MF_STRING | f, ID_MESSEN, w(t).as_ptr());
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w(&format!("Mausi v{}", env!("CARGO_PKG_VERSION"))).as_ptr());
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
     let mut angebote: Vec<Angebot> = Vec::new();
     let mut live_dpi: Vec<LiveDpi> = Vec::new();
-    // Eine Maus: Einstellungen direkt im Hauptmenü
+    // Eine Maus: Einstellungen direkt im Hauptmenü. Kopf in zwei Zeilen, damit das Menü schmal bleibt.
     let flach = liste.len() == 1;
     for (k, e) in liste.iter().enumerate() {
+        let kopf_id = GERAET * (k + 1) + ID_KOPF;
         match &e.stand {
             Some(s) if flach => {
-                AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w(&kopf(s)).as_ptr());
+                AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w(&kopf_name(s)).as_ptr());
+                AppendMenuW(menu, MF_STRING | MF_GRAYED, kopf_id, w(&kopf(s)).as_ptr());
                 angebote.push(geraet_einfuegen(menu, k, s));
             }
             Some(s) => {
                 let sub = CreatePopupMenu();
+                AppendMenuW(sub, MF_STRING | MF_GRAYED, kopf_id, w(&kopf(s)).as_ptr());
                 angebote.push(geraet_einfuegen(sub, k, s));
-                AppendMenuW(menu, MF_POPUP, sub as usize, w(&kopf(s)).as_ptr());
+                AppendMenuW(menu, MF_POPUP, sub as usize, w(&kopf_name(s)).as_ptr());
             }
             None => {
                 angebote.push(Angebot::default());
@@ -1236,12 +1605,22 @@ unsafe fn menu_zeigen_innen(hwnd: HWND, p: POINT) -> bool {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w(t).as_ptr());
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    // Programm-Einstellungen in einem Untermenü
+    let einst = CreatePopupMenu();
+    let (t, f) = if messen { (LIVE_LEER, MF_CHECKED) } else { (MESSEN_AUS, 0) };
+    AppendMenuW(einst, MF_STRING | f, ID_MESSEN, w(t).as_ptr());
+    AppendMenuW(einst, MF_STRING, ID_NEU, w("Mäuse neu suchen").as_ptr());
+    AppendMenuW(einst, MF_SEPARATOR, 0, null());
     let auto = if autostart_an() { MF_CHECKED } else { 0 };
-    AppendMenuW(menu, MF_STRING | auto, ID_AUTO, w("Mit Windows starten").as_ptr());
+    AppendMenuW(einst, MF_STRING | auto, ID_AUTO, w("Mit Windows starten").as_ptr());
     let im_startmenue = startmenue::vorhanden("Mausi");
-    AppendMenuW(menu, MF_STRING | if im_startmenue { MF_CHECKED } else { 0 }, ID_STARTMENUE, w("Im Startmenü anzeigen").as_ptr());
-    let schwarz = if design::schwarz() { MF_CHECKED } else { 0 };
-    AppendMenuW(menu, MF_STRING | schwarz, ID_DESIGN, w("Schwarzes Design").as_ptr());
+    AppendMenuW(einst, MF_STRING | if im_startmenue { MF_CHECKED } else { 0 }, ID_STARTMENUE, w("Im Startmenü anzeigen").as_ptr());
+    // Design für Menü, Eingabefeld, Hinweise und Einblendung
+    let schwarz = design::schwarz();
+    let ds = CreatePopupMenu();
+    AppendMenuW(ds, MF_STRING | if schwarz { MF_CHECKED } else { 0 }, ID_DESIGN, w("Dunkel").as_ptr());
+    AppendMenuW(ds, MF_STRING | if schwarz { 0 } else { MF_CHECKED }, ID_HELL, w("Hell").as_ptr());
+    AppendMenuW(einst, MF_POPUP, ds as usize, w("Design").as_ptr());
     let sub = CreatePopupMenu();
     let gewaehlt = symbol_einstellung();
     for (i, name) in SYMBOL_NAMEN.iter().enumerate() {
@@ -1251,24 +1630,45 @@ unsafe fn menu_zeigen_innen(hwnd: HWND, p: POINT) -> bool {
             AppendMenuW(sub, MF_SEPARATOR, 0, null());
         }
     }
-    AppendMenuW(menu, MF_POPUP, sub as usize, w("Tray-Symbol").as_ptr());
-    AppendMenuW(menu, MF_STRING, ID_NEU, w("Mäuse neu suchen").as_ptr());
+    AppendMenuW(einst, MF_POPUP, sub as usize, w("Tray-Symbol").as_ptr());
+    AppendMenuW(menu, MF_POPUP, einst as usize, w("Einstellungen").as_ptr());
     AppendMenuW(menu, MF_STRING, ID_ENDE, w("Beenden").as_ptr());
 
     if design::schwarz() {
+        // Platz für die längste Messzeile, das Menü wächst nicht mehr, wenn es schon offen ist
+        let lang = namen.iter().map(|(_, n)| n.as_str()).max_by_key(|n| n.chars().count()).unwrap_or("");
+        design::platz_vormerken(ID_MESSEN as u32, &format!("8000 Hz – {lang}"));
         design::menu_schwarz(menu);
     }
     SetForegroundWindow(hwnd);
     live_starten(hwnd, menu, messen, namen, live_dpi);
-    let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, null());
+    // Mausklicks auf Werte und Haken führt der Filter selbst aus, das Menü bleibt dabei offen
+    OFFEN_ANGEBOT.with(|a| *a.borrow_mut() = angebote);
+    let thread = windows_sys::Win32::System::Threading::GetCurrentThreadId();
+    let hook = SetWindowsHookExW(WH_MSGFILTER, Some(menu_filter), null_mut(), thread);
+    let lage = SetWindowsHookExW(WH_CALLWNDPROC, Some(menu_lage), null_mut(), thread);
+    let (q, ausrichtung) = menu_platz(p);
+    let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | ausrichtung, q.x, q.y, 0, hwnd, null());
+    for h in [hook, lage] {
+        if !h.is_null() {
+            UnhookWindowsHookEx(h);
+        }
+    }
+    let angebote = OFFEN_ANGEBOT.with(|a| std::mem::take(&mut *a.borrow_mut()));
     live_stoppen(hwnd);
     DestroyMenu(menu);
     design::menu_fertig();
     PostMessageW(hwnd, WM_NULL, 0, 0);
+    if let Some(e) = OFFEN_FEHLER.with(|f| f.borrow_mut().take()) {
+        melden(hwnd, &e);
+    }
     let cmd = cmd.max(0) as usize;
 
     let mut gewechselt = None;
-    let ergebnis = match cmd {
+    let ergebnis = if let Some(r) = wert_setzen(cmd, &angebote) {
+        r.map(|k| gewechselt = k)
+    } else {
+        match cmd {
         ID_ENDE => {
             DestroyWindow(hwnd);
             return false;
@@ -1277,30 +1677,17 @@ unsafe fn menu_zeigen_innen(hwnd: HWND, p: POINT) -> bool {
             MESSEN.set(!messen);
             return true;
         }
-        ID_AUTO => {
-            autostart_setzen(auto == 0);
-            Ok(())
-        }
-        ID_STARTMENUE => {
-            startmenue::setzen("Mausi", !im_startmenue);
-            Ok(())
-        }
         ID_NEU => {
             suche_starten();
             Ok(())
         }
-        ID_DESIGN => {
-            design::setzen(schwarz == 0);
-            Ok(())
-        }
-        c if (ID_SYMBOL..ID_SYMBOL + SYMBOL_NAMEN.len()).contains(&c) => {
-            let nr = c - ID_SYMBOL;
-            zustand::merken(SYMBOL_SCHLUESSEL, (nr != 0).then_some(SYMBOL_WERTE[nr]));
+        ID_DESIGN | ID_HELL => {
+            design::setzen(cmd == ID_DESIGN);
             Ok(())
         }
         c if (GERAET..GERAET * (MAX_GERAETE + 1)).contains(&c) => {
             let k = c / GERAET - 1;
-            let (Some(e), Some(an)) = (liste.get(k), angebote.get(k)) else { return false };
+            let Some(e) = liste.get(k) else { return false };
             let Some(s) = &e.stand else { return false };
             let name_im_titel = (!flach).then_some(e.name.as_str());
             match c % GERAET {
@@ -1317,52 +1704,20 @@ unsafe fn menu_zeigen_innen(hwnd: HWND, p: POINT) -> bool {
                     winusb_starten();
                     Ok(())
                 }
-                ID_VDPI_AUS => {
-                    spiel_merken(k, Some(None), None);
-                    Ok(())
-                }
-                ID_VHZ_AUS => {
-                    spiel_merken(k, None, Some(None));
-                    Ok(())
-                }
-                l if (ID_VDPI..ID_VDPI + an.vdpi.len()).contains(&l) => {
-                    spiel_merken(k, Some(Some(an.vdpi[l - ID_VDPI])), None);
-                    Ok(())
-                }
-                l if (ID_VHZ..ID_VHZ + an.raten.len()).contains(&l) => {
-                    spiel_merken(k, None, Some(Some(an.raten[l - ID_VHZ])));
-                    Ok(())
-                }
-                l if (ID_DPI..ID_DPI + an.dpi.len()).contains(&l) => {
-                    let v = an.dpi[l - ID_DPI];
-                    let r = mit_maus(k, |m| m.set_dpi(v)).map(|_| ());
-                    gewechselt = r.is_ok().then_some(k);
-                    r
-                }
-                l if (ID_HZ..ID_HZ + an.raten.len()).contains(&l) => {
-                    let v = an.raten[l - ID_HZ];
-                    let r = mit_maus(k, |m| m.set_hz(v)).map(|name| {
-                        zustand::hz_merken(&name, v);
-                        APP.with(|c| {
-                            if let Some(g) = c.borrow_mut().geraete.get_mut(k) {
-                                g.hz_gesetzt = Some(v);
-                            }
-                        });
-                    });
-                    gewechselt = r.is_ok().then_some(k);
-                    r
-                }
                 _ => return false,
             }
         }
         _ => return false,
+        }
     };
     if let Err(e) = ergebnis {
         melden(hwnd, &e);
     }
     let liste = tip_aktualisieren(hwnd, NIM_MODIFY);
-    if let Some(k) = gewechselt {
-        einblenden(liste.get(k).and_then(|e| e.stand.as_ref()));
+    match gewechselt {
+        Some(k) if ist_vollbild(cmd) => vollbild_einblenden(k),
+        Some(k) => einblenden(liste.get(k).and_then(|e| e.stand.as_ref())),
+        None => {}
     }
     false
 }

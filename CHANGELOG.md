@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9 (23.11.2026)
+
+- Behoben: Nach einem Klick auf einen DPI- oder Hz-Wert im Traymenü reagierten Maus und Tastatur nicht mehr, bis der PC ausgeschaltet wurde. Mausi stellte die Maus ein, während das Menü noch offen war. Das Menü hält Maus und Tastatur fest, und hing die Maus kurz, war das ganze System blockiert. Jetzt schließt sich das Menü erst, dann stellt Mausi den Wert ein. Schalter und Vollbild-Werte (ohne laufendes Spiel) bleiben wie bisher bei offenem Menü klickbar.
+- Geändert: Traymenü und alle Untermenüs gehen nach oben und zur Bildschirmmitte hin auf, nicht mehr seitlich oder nach unten. Im dunklen Design steht der Untermenü-Pfeil auf der Seite, zu der das Untermenü aufgeht. Mit der Tastatur geöffnete Untermenüs legt weiter Windows hin.
+- Geändert: Das Traymenü ist schmaler. Die Maus steht in zwei Zeilen: Name und Akku, darunter DPI und Hz. „Hz messen“ und „Mäuse neu suchen“ liegen jetzt unter „Einstellungen“. „Hz messen“ schaltet sich im offenen Menü ein und aus, das Menü bleibt dabei offen. „Vollbild (Spiel)“ heißt jetzt „Vollbild“.
+
 ## 0.2.8 (23.11.2026)
 
 - Behoben: RGB-Beleuchtung anderer Geräte blitzte gelegentlich auf, z. B. die Gehäuselüfter am ASRock-Polychrome-Controller, die kurz weiß wurden. Bei jeder Suche nach Mäusen (alle 30 s, solange ein Empfänger ohne Maus steckt, und bei jedem An- oder Abstecken) las Mausi Name und Seriennummer *aller* HID-Geräte aus. Daran verschluckt sich so ein Controller ab und zu. Jetzt liest Mausi nur noch Logitech-Geräte und die Geräte aus, die Windows als Maus führt. Gemessen: alte Version 9 Blitze bei 106 Abfragen, neue Version 0 bei rund 240.

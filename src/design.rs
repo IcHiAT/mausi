@@ -31,7 +31,9 @@ const HELL_LINIE: u32 = 0xC8C8C8;
 
 pub const KLASSE_OSD: &str = "MausOsd";
 const OSD_B: i32 = 150;
-const OSD_H: i32 = 82;
+const OSD_H: i32 = 122;
+/// Höhe der Namenszeile oben in der Einblendung
+const OSD_NAME_H: i32 = 22;
 const OSD_ALPHA: f32 = 240.0;
 const OSD_EIN_MS: f32 = 220.0;
 const OSD_HALTEN_MS: f32 = 2600.0;
@@ -50,7 +52,7 @@ thread_local! {
     static OSD: Cell<HWND> = Cell::new(null_mut());
     static OSD_START: Cell<Option<Instant>> = Cell::new(None);
     static OSD_AKTUELL: Cell<f32> = Cell::new(0.0);
-    static OSD_WERTE: RefCell<(String, String)> = RefCell::new((String::new(), String::new()));
+    static OSD_WERTE: RefCell<(String, String, String, String)> = RefCell::new((String::new(), String::new(), String::new(), String::new()));
     static FONT_GROSS: Cell<HFONT> = Cell::new(null_mut());
     static FONT_KLEIN: Cell<HFONT> = Cell::new(null_mut());
 }
@@ -188,6 +190,15 @@ pub unsafe fn menu_messen(hwnd: HWND, lp: LPARAM) -> bool {
             DrawTextW(dc, e.text.as_ptr(), e.text.len() as i32, &mut r, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
         }
     });
+    PLATZ.with(|p| {
+        if let Some((id, text)) = &*p.borrow() {
+            if *id == m.itemID {
+                let mut v: RECT = std::mem::zeroed();
+                DrawTextW(dc, text.as_ptr(), text.len() as i32, &mut v, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+                r.right = r.right.max(v.right);
+            }
+        }
+    });
     SelectObject(dc, alt);
     ReleaseDC(hwnd, dc);
     m.itemWidth = r.right as u32 + 56;
@@ -227,8 +238,13 @@ pub unsafe fn menu_malen(lp: LPARAM) -> bool {
             let mut f = RECT { left: r.left + 30, top: r.top, right: r.right - 22, bottom: r.bottom };
             DrawTextW(d.hDC, e.text.as_ptr(), e.text.len() as i32, &mut f, fmt);
             if e.untermenu {
-                let mut f = RECT { left: r.right - 20, top: r.top, right: r.right - 6, bottom: r.bottom };
-                DrawTextW(d.hDC, w("›").as_ptr(), -1, &mut f, fmt);
+                // Der Pfeil zeigt dorthin, wo das Untermenü aufgeht (siehe tray::untermenue_legen)
+                let (pfeil, mut f) = if untermenue_links(d.hDC) {
+                    ("‹", RECT { left: r.left + 10, top: r.top, right: r.left + 26, bottom: r.bottom })
+                } else {
+                    ("›", RECT { left: r.right - 20, top: r.top, right: r.right - 6, bottom: r.bottom })
+                };
+                DrawTextW(d.hDC, w(pfeil).as_ptr(), -1, &mut f, fmt);
             }
         }
     });
@@ -236,6 +252,31 @@ pub unsafe fn menu_malen(lp: LPARAM) -> bool {
     // Sonst malt Windows seinen eigenen (schwarzen) Untermenü-Pfeil darüber
     ExcludeClipRect(d.hDC, r.left, r.top, r.right, r.bottom);
     true
+}
+
+thread_local! {
+    /// Untermenüs gehen nach links auf (Menü rechts der Bildschirmmitte geöffnet). Setzt `tray::menu_platz`.
+    static PFEIL_LINKS: Cell<bool> = const { Cell::new(false) };
+}
+
+thread_local! {
+    /// Eintrag (ID), der mindestens so breit wie dieser Text gemessen wird
+    static PLATZ: std::cell::RefCell<Option<(u32, Vec<u16>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Breite für einen Eintrag vormerken, dessen Text sich bei offenem Menü verlängert.
+pub fn platz_vormerken(id: u32, text: &str) {
+    PLATZ.set(Some((id, text.encode_utf16().collect())));
+}
+
+pub fn pfeil_links_setzen(links: bool) {
+    PFEIL_LINKS.set(links);
+}
+
+/// Beim ersten Zeichnen steht das Menüfenster noch nicht an seinem Platz; darum zählt,
+/// wo das Menü geöffnet wurde, nicht wo das Fenster gerade ist.
+fn untermenue_links(_dc: HDC) -> bool {
+    PFEIL_LINKS.get()
 }
 
 // ---------- Eingabefenster und Akku-Hinweis ----------
@@ -286,9 +327,10 @@ unsafe fn font(cache: &'static std::thread::LocalKey<Cell<HFONT>>, hoehe: i32, g
     cache.get()
 }
 
-pub unsafe fn osd_zeigen(dpi: Option<u32>, hz: Option<u32>, im_spiel: bool) {
+/// `modus`: klein unter den Werten, „Desktop“ oder „Vollbild“
+pub unsafe fn osd_zeigen(name: &str, dpi: Option<u32>, hz: Option<u32>, modus: &str, im_spiel: bool) {
     let zahl = |v: Option<u32>| v.map(|x| x.to_string()).unwrap_or("–".into());
-    OSD_WERTE.with(|o| *o.borrow_mut() = (zahl(dpi), zahl(hz)));
+    OSD_WERTE.with(|o| *o.borrow_mut() = (name.to_string(), zahl(dpi), zahl(hz), modus.to_string()));
 
     let mut hwnd = OSD.get();
     if hwnd.is_null() {
@@ -367,9 +409,14 @@ unsafe fn osd_malen(hwnd: HWND) {
     let gross = font(&FONT_GROSS, 26, 600);
     let klein = font(&FONT_KLEIN, 14, 400);
     let alt = SelectObject(dc, gross as HGDIOBJ);
-    let (dpi, hz) = OSD_WERTE.with(|o| o.borrow().clone());
+    let (name, dpi, hz, modus) = OSD_WERTE.with(|o| o.borrow().clone());
+    // Oben der Name der Maus, z. B. „PRO X 2“ oder „G400s“
+    SelectObject(dc, klein as HGDIOBJ);
+    SetTextColor(dc, grau);
+    let mut f = RECT { left: 10, top: 6, right: OSD_B - 6, bottom: 6 + OSD_NAME_H };
+    DrawTextW(dc, w(&name).as_ptr(), -1, &mut f, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
     for (i, (wert, einheit)) in [(dpi, "DPI"), (hz, "Hz")].iter().enumerate() {
-        let oben = 7 + i as i32 * 34;
+        let oben = 7 + OSD_NAME_H + i as i32 * 34;
         let unten = oben + 34;
         SelectObject(dc, gross as HGDIOBJ);
         SetTextColor(dc, text);
@@ -380,6 +427,12 @@ unsafe fn osd_malen(hwnd: HWND) {
         let mut f = RECT { left: 110, top: oben + 3, right: OSD_B - 4, bottom: unten };
         DrawTextW(dc, w(einheit).as_ptr(), -1, &mut f, DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX);
     }
+    // Unten klein, wofür die Werte gelten
+    SelectObject(dc, klein as HGDIOBJ);
+    SetTextColor(dc, grau);
+    let oben = 7 + OSD_NAME_H + 2 * 34;
+    let mut f = RECT { left: 10, top: oben, right: OSD_B - 6, bottom: oben + 20 };
+    DrawTextW(dc, w(&modus).as_ptr(), -1, &mut f, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
     SelectObject(dc, alt);
     EndPaint(hwnd, &ps);
 }
